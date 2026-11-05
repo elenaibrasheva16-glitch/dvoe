@@ -33,7 +33,7 @@
   }
 
   // --- Parse User Identity ---
-  function detectCurrentUser() {
+  function resolveCurrentUser() {
     let qUser = '';
     if (typeof URLSearchParams !== 'undefined' && window.location?.search) {
       const params = new URLSearchParams(window.location.search);
@@ -42,16 +42,36 @@
         qUser = `user_${params.get('tg_id')}`;
       }
     }
-    if (qUser) return qUser.toLowerCase().replace('@', '');
+    if (qUser) {
+      const u = qUser.toLowerCase().replace('@', '');
+      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      return u;
+    }
 
     if (tg?.initDataUnsafe?.user?.username) {
-      return tg.initDataUnsafe.user.username.toLowerCase();
+      const u = tg.initDataUnsafe.user.username.toLowerCase();
+      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      return u;
     }
     if (tg?.initDataUnsafe?.user?.id) {
-      return `user_${tg.initDataUnsafe.user.id}`;
+      const u = `user_${tg.initDataUnsafe.user.id}`;
+      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      return u;
     }
-    return 'ksjjfnnn'; // Default local / admin testing fallback
+
+    try {
+      const savedUser = localStorage.getItem('dvoe_tg_user');
+      if (savedUser && savedUser.trim()) {
+        return savedUser.trim().toLowerCase();
+      }
+    } catch (e) {}
+
+    // Unique guest identifier fallback for non-telegram / standalone browsers
+    const guestId = `guest_${Math.random().toString(36).substring(2, 10)}`;
+    try { localStorage.setItem('dvoe_tg_user', guestId); } catch (e) {}
+    return guestId;
   }
+  const detectCurrentUser = resolveCurrentUser;
 
   function detectDisplayName() {
     if (tg?.initDataUnsafe?.user?.first_name) {
@@ -69,9 +89,21 @@
     if (typeof URLSearchParams !== 'undefined' && window.location?.search) {
       const params = new URLSearchParams(window.location.search);
       const qId = parseInt(params.get('tg_id'), 10);
-      if (qId && !isNaN(qId)) return qId;
+      if (qId && !isNaN(qId)) {
+        try { localStorage.setItem('dvoe_tg_id', String(qId)); } catch (e) {}
+        return qId;
+      }
     }
-    return tg?.initDataUnsafe?.user?.id || 0;
+    if (tg?.initDataUnsafe?.user?.id) {
+      const tid = tg.initDataUnsafe.user.id;
+      try { localStorage.setItem('dvoe_tg_id', String(tid)); } catch (e) {}
+      return tid;
+    }
+    try {
+      const savedId = parseInt(localStorage.getItem('dvoe_tg_id'), 10);
+      if (savedId && !isNaN(savedId)) return savedId;
+    } catch (e) {}
+    return 0;
   }
 
   // --- Predefined Moods ---
@@ -99,6 +131,7 @@
     partner: null,
     isPaired: false,
     relationshipStart: '2024-02-14',
+    pairedAt: 0,
     selectedMood: { emoji: '🥰', label: 'Люблю' },
     timerInterval: null,
     pollInterval: null,
@@ -117,6 +150,7 @@
     userMoodEmoji: document.getElementById('user-mood-emoji'),
     userMoodLabel: document.getElementById('user-mood-label'),
     userPhoto: document.getElementById('user-photo'),
+    userActiveDot: document.getElementById('user-active-dot'),
     userDisplayName: document.getElementById('user-display-name'),
     userHandle: document.getElementById('user-handle'),
     
@@ -128,6 +162,7 @@
     partnerMoodEmoji: document.getElementById('partner-mood-emoji'),
     partnerMoodLabel: document.getElementById('partner-mood-label'),
     partnerPhoto: document.getElementById('partner-photo'),
+    partnerActiveDot: document.getElementById('partner-active-dot'),
     partnerDisplayName: document.getElementById('partner-display-name'),
     partnerHandle: document.getElementById('partner-handle'),
     emptyPartnerOverlay: document.getElementById('empty-partner-overlay'),
@@ -244,10 +279,17 @@
 
   async function apiPost(path, data) {
     try {
+      const payload = Object.assign({}, data);
+      if (payload.username === undefined && state.username) {
+        payload.username = state.username;
+      }
+      if (payload.tg_id === undefined && state.tgId) {
+        payload.tg_id = state.tgId;
+      }
       const res = await fetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify(payload),
       });
       return await res.json();
     } catch (e) {
@@ -364,17 +406,21 @@
 
     let d0;
     if (state.relationshipStart.includes('T')) {
-      const parts = state.relationshipStart.split('T');
-      const dateParts = parts[0].split('-').map(Number);
-      const timeParts = (parts[1] || '00:00:00').split('.')[0].split(':').map(Number);
-      d0 = new Date(
-        dateParts[0],
-        dateParts[1] - 1,
-        dateParts[2],
-        timeParts[0] || 0,
-        timeParts[1] || 0,
-        timeParts[2] || 0
-      );
+      if (state.pairedAt && state.pairedAt > 0) {
+        d0 = new Date(state.pairedAt * 1000);
+      } else {
+        const parts = state.relationshipStart.split('T');
+        const dateParts = parts[0].split('-').map(Number);
+        const timeParts = (parts[1] || '00:00:00').split('.')[0].split(':').map(Number);
+        d0 = new Date(
+          dateParts[0],
+          dateParts[1] - 1,
+          dateParts[2],
+          timeParts[0] || 0,
+          timeParts[1] || 0,
+          timeParts[2] || 0
+        );
+      }
     } else {
       const startParts = state.relationshipStart.split('-');
       if (startParts.length < 3) return;
@@ -448,6 +494,17 @@
     state.user = data.user;
     state.partner = data.partner;
     state.isPaired = Boolean(data.isPaired);
+    state.pairedAt = data.pairedAt || 0;
+
+    if (data.user?.username) {
+      state.username = data.user.username;
+      try { localStorage.setItem('dvoe_tg_user', state.username); } catch (e) {}
+    }
+    if (data.user?.tgId) {
+      state.tgId = data.user.tgId;
+      try { localStorage.setItem('dvoe_tg_id', String(state.tgId)); } catch (e) {}
+    }
+
     if (data.serverTime) {
       state.serverTimeOffset = (data.serverTime * 1000) - Date.now();
     }
@@ -458,10 +515,27 @@
       el.coupleStatusText.textContent = state.isPaired ? 'Вместе 💕' : 'В поиске пары';
     }
 
+    // Active dots
+    if (el.userActiveDot) {
+      el.userActiveDot.classList.remove('hidden');
+    }
+    if (el.partnerActiveDot) {
+      const isOnline = state.isPaired && state.partner && state.partner.lastActive && ((Date.now() / 1000) - state.partner.lastActive <= 300);
+      if (isOnline) {
+        el.partnerActiveDot.classList.remove('hidden');
+      } else {
+        el.partnerActiveDot.classList.add('hidden');
+      }
+    }
+
     // User (You)
     const userPhotoSrc = state.user.photoUrl || '/img/avatar_me.svg';
-    el.userPhoto.src = userPhotoSrc;
-    el.settingsPreviewPhoto.src = userPhotoSrc;
+    if (el.userPhoto && el.userPhoto.getAttribute('src') !== userPhotoSrc) {
+      el.userPhoto.src = userPhotoSrc;
+    }
+    if (el.settingsPreviewPhoto && el.settingsPreviewPhoto.getAttribute('src') !== userPhotoSrc) {
+      el.settingsPreviewPhoto.src = userPhotoSrc;
+    }
     el.userDisplayName.textContent = state.user.displayName || state.user.username;
     el.userHandle.textContent = state.user.username.startsWith('user_') ? '' : `@${state.user.username}`;
     const isEditingName = (state.activeTab === 'tab-settings') && (
@@ -477,8 +551,12 @@
     // Partner
     if (state.isPaired && state.partner) {
       const partnerPhotoSrc = state.partner.photoUrl || '/img/avatar_partner.svg';
-      el.partnerPhoto.src = partnerPhotoSrc;
-      el.settingsPartnerPhoto.src = partnerPhotoSrc;
+      if (el.partnerPhoto && el.partnerPhoto.getAttribute('src') !== partnerPhotoSrc) {
+        el.partnerPhoto.src = partnerPhotoSrc;
+      }
+      if (el.settingsPartnerPhoto && el.settingsPartnerPhoto.getAttribute('src') !== partnerPhotoSrc) {
+        el.settingsPartnerPhoto.src = partnerPhotoSrc;
+      }
       el.partnerDisplayName.textContent = state.partner.displayName || state.partner.username;
       el.partnerHandle.textContent = state.partner.username.startsWith('user_') ? '' : `@${state.partner.username}`;
       el.emptyPartnerOverlay.classList.add('hidden');
@@ -509,7 +587,9 @@
       if (el.inviteBoxCard) el.inviteBoxCard.classList.add('hidden');
     } else {
       // Single state
-      el.partnerPhoto.src = '/img/avatar_partner.svg';
+      if (el.partnerPhoto && el.partnerPhoto.getAttribute('src') !== '/img/avatar_partner.svg') {
+        el.partnerPhoto.src = '/img/avatar_partner.svg';
+      }
       el.partnerDisplayName.textContent = 'Пригласить';
       el.partnerHandle.textContent = 'вторую половинку';
       el.emptyPartnerOverlay.classList.remove('hidden');
@@ -691,6 +771,7 @@
 
     await apiPost('/api/mood/react', {
       username: state.username,
+      tg_id: state.tgId,
       reaction: reaction,
     });
   }
@@ -722,6 +803,7 @@
         const base64 = canvas.toDataURL('image/jpeg', 0.88);
         const res = await apiPost('/api/photo/upload', {
           username: state.username,
+          tg_id: state.tgId,
           image: base64,
         });
 
@@ -775,6 +857,7 @@
 
     const res = await apiPost('/api/profile', {
       username: state.username,
+      tg_id: state.tgId,
       displayName: val,
     });
 
@@ -807,6 +890,7 @@
 
     const res = await apiPost('/api/mood', {
       username: state.username,
+      tg_id: state.tgId,
       emoji: state.selectedMood.emoji,
       label: state.selectedMood.label,
       reason: reason,
@@ -832,6 +916,7 @@
 
     const res = await apiPost('/api/relationship-date', {
       username: state.username,
+      tg_id: state.tgId,
       date: dVal,
     });
 
@@ -854,6 +939,7 @@
 
     const res = await apiPost('/api/pair', {
       username: state.username,
+      tg_id: state.tgId,
       partner_code: code,
     });
 
@@ -885,6 +971,7 @@
 
     const res = await apiPost('/api/pair/unlink', {
       username: state.username,
+      tg_id: state.tgId,
     });
 
     if (res && res.ok) {
@@ -1056,7 +1143,7 @@
       el.heartBtn.classList.add('heart-pop-anim');
 
       showToast('Любовь отправлена! 💕');
-      const res = await apiPost('/api/heart-nudge', { username: state.username, reaction: '❤️' });
+      const res = await apiPost('/api/heart-nudge', { username: state.username, tg_id: state.tgId, reaction: '❤️' });
       if (res && res.state) {
         renderState(res.state);
       }
@@ -1103,7 +1190,7 @@
     el.btnResetPhoto?.addEventListener('click', async () => {
       haptic('light');
       showToast('Сбрасываем фото...');
-      const res = await apiPost('/api/photo/reset', { username: state.username });
+      const res = await apiPost('/api/photo/reset', { username: state.username, tg_id: state.tgId });
       if (res && res.ok) {
         haptic('success');
         showToast('Фото сброшено на стандартное ✨');

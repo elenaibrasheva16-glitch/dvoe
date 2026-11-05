@@ -180,11 +180,49 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pair_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_username TEXT,
+                to_username TEXT,
+                code TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at REAL
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                filename TEXT PRIMARY KEY,
+                content BLOB,
+                updated_at REAL
+            )
+        """)
+
         # Generate invite_code for any users lacking one
         for row in cur.execute("SELECT username, invite_code FROM users").fetchall():
             if not row["invite_code"]:
                 code = "PAIR-" + secrets.token_hex(3).upper()
                 cur.execute("UPDATE users SET invite_code = ? WHERE username = ?", (code, row["username"]))
+
+        # Guarantee owner has private invite code (replace leaked PAIR-1CAAF2)
+        cur.execute("UPDATE users SET invite_code = 'PAIR-DVOE23' WHERE username = 'ksjjfnnn' AND (invite_code = 'PAIR-1CAAF2' OR invite_code IS NULL OR invite_code = '')")
+        # Clean soft hyphen \xad from adamlanda display name
+        cur.execute("UPDATE users SET display_name = 'Любимая' WHERE username = 'adamlanda' AND (display_name LIKE '%\xad%' OR display_name = 'я' OR display_name = '')")
+
+        # Sync existing uploads to uploaded_files
+        try:
+            if os.path.exists(UPLOADS_DIR):
+                for fname in os.listdir(UPLOADS_DIR):
+                    if not fname.startswith("test_") and not fname.startswith(".") and os.path.isfile(os.path.join(UPLOADS_DIR, fname)):
+                        fpath = os.path.join(UPLOADS_DIR, fname)
+                        row_uf = cur.execute("SELECT filename FROM uploaded_files WHERE filename = ?", (fname,)).fetchone()
+                        if not row_uf:
+                            with open(fpath, "rb") as f_up:
+                                cur.execute("INSERT OR REPLACE INTO uploaded_files (filename, content, updated_at) VALUES (?, ?, ?)",
+                                            (fname, f_up.read(), time.time()))
+        except Exception:
+            pass
 
         conn.commit()
         conn.close()
@@ -196,8 +234,35 @@ init_db()
 def normalize_username(u: str) -> str:
     if not u:
         return ""
-    u = u.strip().lstrip("@").lower()
+    u = str(u).strip().lstrip("@").lower()
     return re.sub(r"[^a-zA-Z0-9_]", "", u)
+
+
+def normalize_display_name(name: str) -> str:
+    """Strips invisible/non-printable unicode characters and trims length."""
+    if not name:
+        return ""
+    cleaned = re.sub(r"[\u1160\u3164\u200b\u200c\u200d\u200e\u200f\xad\u2800\ufeff]", "", str(name))
+    cleaned = cleaned.strip()
+    return cleaned[:40]
+
+
+def save_uploaded_file_to_db(filename: str, filepath: str):
+    """Persists uploaded avatar in SQLite uploaded_files table to survive Render restarts."""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                content = f.read()
+            with db_lock:
+                conn = get_db()
+                conn.execute(
+                    "INSERT OR REPLACE INTO uploaded_files (filename, content, updated_at) VALUES (?, ?, ?)",
+                    (filename, content, time.time())
+                )
+                conn.commit()
+                conn.close()
+    except Exception as e:
+        print(f"[Upload DB Save Error] {e}")
 
 
 def generate_invite_code() -> str:
@@ -256,6 +321,7 @@ def download_and_crop_square_photo(url: str, username: str) -> str:
                 filepath = os.path.join(UPLOADS_DIR, filename)
                 with open(filepath, "wb") as f:
                     f.write(r.content)
+                save_uploaded_file_to_db(filename, filepath)
                 return f"/uploads/{filename}"
 
             filename = f"avatar_{username}_{file_hash}.jpg"
@@ -264,6 +330,7 @@ def download_and_crop_square_photo(url: str, username: str) -> str:
                 f.write(r.content)
             res = process_and_crop_square_image(filepath)
             if res:
+                save_uploaded_file_to_db(filename, filepath)
                 return f"/uploads/{filename}"
     except Exception as e:
         print(f"[Download Avatar Error] {e}")
@@ -289,6 +356,7 @@ def save_base64_upload(base64_str: str, username: str) -> str:
     if min_dim > 800:
         img_cropped = img_cropped.resize((800, 800), Image.Resampling.LANCZOS)
     img_cropped.save(filepath, "JPEG", quality=90, optimize=True)
+    save_uploaded_file_to_db(filename, filepath)
 
     return f"/uploads/{filename}"
 
@@ -324,10 +392,28 @@ def tg_api_call(method: str, payload: dict):
 _configured_menu_chats = set()
 _menu_lock = threading.Lock()
 
-def get_main_reply_keyboard() -> dict:
+def get_user_webapp_url(chat_id=None, uname="") -> str:
     curr_url = get_current_webapp_url()
-    if curr_url and curr_url.startswith("https://"):
-        open_btn = {"text": "💑 Открыть «Двое»", "web_app": {"url": curr_url}}
+    if not curr_url or not curr_url.startswith("https://"):
+        return curr_url or ""
+    params = []
+    if chat_id:
+        try:
+            params.append(f"tg_id={int(chat_id)}")
+        except (ValueError, TypeError):
+            pass
+    if uname and not str(uname).startswith("user_"):
+        params.append(f"tg_user={urllib.parse.quote(str(uname))}")
+    if params:
+        sep = "&" if "?" in curr_url else "?"
+        return f"{curr_url}{sep}{'&'.join(params)}"
+    return curr_url
+
+
+def get_main_reply_keyboard(chat_id=None, uname="") -> dict:
+    url = get_user_webapp_url(chat_id, uname)
+    if url and url.startswith("https://"):
+        open_btn = {"text": "💑 Открыть «Двое»", "web_app": {"url": url}}
     else:
         open_btn = {"text": "💑 Открыть «Двое»"}
     return {
@@ -370,7 +456,7 @@ def ensure_chat_menu_button(chat_id):
         _configured_menu_chats.add(cache_key)
 
 
-def tg_send_message(chat_id: int, text: str, reply_markup: dict = None):
+def tg_send_message(chat_id: int, text: str, reply_markup: dict = None, uname: str = ""):
     try:
         ensure_chat_menu_button(chat_id)
     except Exception:
@@ -383,17 +469,18 @@ def tg_send_message(chat_id: int, text: str, reply_markup: dict = None):
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     else:
-        payload["reply_markup"] = get_main_reply_keyboard()
+        payload["reply_markup"] = get_main_reply_keyboard(chat_id=chat_id, uname=uname)
     return tg_api_call("sendMessage", payload)
 
 
-def tg_send_photo(chat_id: int, photo_path: str, caption: str, reply_markup: dict = None):
+def tg_send_photo(chat_id: int, photo_path: str, caption: str, reply_markup: dict = None, uname: str = ""):
     """Sends a photo with caption and reply markup to Telegram chat, falling back to text message on error."""
     global _tg_session
     try:
         ensure_chat_menu_button(chat_id)
     except Exception:
         pass
+    effective_markup = reply_markup if reply_markup is not None else get_main_reply_keyboard(chat_id=chat_id, uname=uname)
     if not BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -463,6 +550,7 @@ def fetch_and_save_tg_avatar(tg_id: int, username: str) -> str:
             with open(filepath, "wb") as f:
                 f.write(r.content)
             process_and_crop_square_image(filepath)
+            save_uploaded_file_to_db(filename, filepath)
             return f"/uploads/{filename}"
     except Exception as e:
         print(f"[Fetch TG Avatar Error] {e}")
@@ -566,22 +654,36 @@ def ensure_user(username: str, display_name: str = "", tg_id: int = None, photo_
     if not username:
         return None
     now = time.time()
+    display_name = normalize_display_name(display_name)
 
+    # Check if user already has an existing valid avatar in /uploads/ to avoid repeat network downloads
     local_photo = ""
-    if photo_url and photo_url.startswith("http"):
-        cached = download_and_crop_square_photo(photo_url, username)
-        if cached:
-            local_photo = cached
-    elif photo_url and photo_url.startswith("/"):
-        local_photo = photo_url
+    with db_lock:
+        conn = get_db()
+        ex = conn.execute("SELECT photo_url, photo_custom FROM users WHERE username = ?", (username,)).fetchone()
+        conn.close()
 
-    if not local_photo and tg_id:
-        try:
-            tg_avatar = fetch_and_save_tg_avatar(int(tg_id), username)
-            if tg_avatar:
-                local_photo = tg_avatar
-        except Exception:
-            pass
+    existing_photo = ex["photo_url"] if (ex and ex["photo_url"]) else ""
+    if existing_photo and existing_photo.startswith("/uploads/"):
+        disk_f = os.path.join(PUBLIC_DIR, existing_photo.lstrip("/"))
+        if os.path.exists(disk_f) and os.path.getsize(disk_f) > 0:
+            local_photo = existing_photo
+
+    if not local_photo:
+        if photo_url and photo_url.startswith("http"):
+            cached = download_and_crop_square_photo(photo_url, username)
+            if cached:
+                local_photo = cached
+        elif photo_url and photo_url.startswith("/"):
+            local_photo = photo_url
+
+        if not local_photo and tg_id:
+            try:
+                tg_avatar = fetch_and_save_tg_avatar(int(tg_id), username)
+                if tg_avatar:
+                    local_photo = tg_avatar
+            except Exception:
+                pass
 
     with db_lock:
         conn = get_db()
@@ -594,6 +696,15 @@ def ensure_user(username: str, display_name: str = "", tg_id: int = None, photo_
             if row_placeholder:
                 row_existing = cur.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
                 if row_existing:
+                    # Transfer partner_username, paired_at, anniversary_date if missing in existing account
+                    p_uname = row_placeholder["partner_username"]
+                    p_at = row_placeholder["paired_at"]
+                    a_date = row_placeholder["anniversary_date"]
+                    if p_uname and not row_existing["partner_username"]:
+                        cur.execute(
+                            "UPDATE users SET partner_username = ?, paired_at = ?, anniversary_date = ? WHERE username = ?",
+                            (p_uname, p_at, a_date, username)
+                        )
                     cur.execute("DELETE FROM users WHERE username = ?", (placeholder_uname,))
                     cur.execute("UPDATE users SET partner_username = ? WHERE partner_username = ?", (username, placeholder_uname))
                     cur.execute("UPDATE support_tickets SET username = ? WHERE username = ?", (username, placeholder_uname))
@@ -743,6 +854,7 @@ def get_user_full_state(username: str):
         "partner": partner_clean,
         "isPaired": bool(partner_dict),
         "relationshipStart": rel_start,
+        "pairedAt": u_dict.get("paired_at") or (partner_dict.get("paired_at") if partner_dict else 0) or 0,
         "serverTime": time.time(),
         "webappUrl": webapp_url,
         "botUsername": BOT_USERNAME,
@@ -883,6 +995,24 @@ def update_menu_button_periodically():
         time.sleep(15)
 
 
+def keep_alive_worker():
+    """Pings the public health check endpoint every 4 minutes (240s) to keep Render free tier awake."""
+    ext_url = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBAPP_URL") or "").strip()
+    if not ext_url or not ext_url.startswith("https://"):
+        return
+    health_url = ext_url.rstrip("/") + "/api/health"
+    print(f"[KeepAlive] Worker started for {health_url}")
+    while True:
+        time.sleep(240)
+        try:
+            req = urllib.request.Request(health_url, headers={"User-Agent": "Dvoe-KeepAlive/2.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                status = resp.getcode()
+                print(f"[KeepAlive] Ping to {health_url} returned {status}")
+        except Exception as e:
+            print(f"[KeepAlive] Ping failed: {e}")
+
+
 def telegram_polling_worker():
     """Bot worker: handles /start (with pair_<code>), /pair, /unlink, /support tickets & callbacks."""
     offset = 0
@@ -928,13 +1058,14 @@ def telegram_polling_worker():
                             chat_id,
                             "🔗 <b>Привязка партнёра</b>\n\n"
                             f"Ваш персональный код: <code>{my_code}</code>\n\n"
-                            "Отправьте код вашей второй половинки (например: <code>PAIR-1CAAF2</code>) ответным сообщением:",
+                            "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) ответным сообщением:",
                             reply_markup={
                                 "inline_keyboard": [
                                     [{"text": "📤 Поделиться моим кодом", "url": share_url}],
                                     [{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]
                                 ]
-                            }
+                            },
+                            uname=uname
                         )
                     elif data == "cancel_pair_code":
                         with db_lock:
@@ -942,7 +1073,7 @@ def telegram_polling_worker():
                             conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (chat_id,))
                             conn.commit()
                             conn.close()
-                        tg_send_message(chat_id, "Привязка отменена.")
+                        tg_send_message(chat_id, "Привязка отменена.", uname=uname)
                     elif data == "support_prompt":
                         with db_lock:
                             conn = get_db()
@@ -954,7 +1085,8 @@ def telegram_polling_worker():
                             "💬 <b>Связь с разработчиком</b>\n\n"
                             "Напишите ваше пожелание, вопрос в поддержку или предложение о сотрудничестве одним сообщением — "
                             "оно сразу будет передано разработчику:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]}
+                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
+                            uname=uname
                         )
                     elif data == "cancel_support":
                         with db_lock:
@@ -962,39 +1094,44 @@ def telegram_polling_worker():
                             conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (chat_id,))
                             conn.commit()
                             conn.close()
-                        tg_send_message(chat_id, "Действие отменено.")
+                        tg_send_message(chat_id, "Действие отменено.", uname=uname)
                     elif data == "show_pair_code":
                         st = get_user_full_state(uname)
                         inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
                         share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
                         share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+                        user_app_url = get_user_webapp_url(chat_id, uname)
+                        open_btn = [{"text": "💑 Открыть Двое", "web_app": {"url": user_app_url}}] if user_app_url.startswith("https://") else []
+                        inline_kb = [[{"text": "📤 Поделиться в Telegram", "url": share_url}]]
+                        if open_btn:
+                            inline_kb.append(open_btn)
                         tg_send_message(
                             chat_id,
                             f"🔗 <b>Ваш код пары:</b> <code>{inv_code}</code>\n\n"
                             f"Перешлите партнёру ссылку для быстрого подключения:\n"
                             f"https://t.me/{BOT_USERNAME}?start=pair_{inv_code}",
-                            reply_markup={"inline_keyboard": [
-                                [{"text": "📤 Поделиться в Telegram", "url": share_url}],
-                                [{"text": "💑 Открыть Двое", "web_app": {"url": get_current_webapp_url()}}]
-                            ]}
+                            reply_markup={"inline_keyboard": inline_kb},
+                            uname=uname
                         )
                     elif data == "about_app":
                         st = get_user_full_state(uname)
                         inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
                         share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
                         share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        about_kb = [
-                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": get_current_webapp_url()}}],
-                            [
-                                {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
-                                {"text": "📤 Пригласить партнёра", "url": share_url}
-                            ],
-                            [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
-                        ]
+                        user_app_url = get_user_webapp_url(chat_id, uname)
+                        about_kb = []
+                        if user_app_url.startswith("https://"):
+                            about_kb.append([{"text": "💑 Открыть «Двое»", "web_app": {"url": user_app_url}}])
+                        about_kb.append([
+                            {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                            {"text": "📤 Пригласить партнёра", "url": share_url}
+                        ])
+                        about_kb.append([{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}])
                         tg_send_message(
                             chat_id,
                             ABOUT_APP_TEXT,
-                            reply_markup={"inline_keyboard": about_kb}
+                            reply_markup={"inline_keyboard": about_kb},
+                            uname=uname
                         )
                     continue
 
@@ -1061,21 +1198,23 @@ def telegram_polling_worker():
                             conn.commit()
                             conn.close()
 
-                        # Forward to admin
-                        admin_msg = (
-                            f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
-                            f"👤 <b>От:</b> {first_name} (@{uname})\n"
-                            f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
-                            f"💬 <b>Текст:</b>\n{text}"
-                        )
-                        tg_send_message(ADMIN_TG_ID, admin_msg)
+                        # Forward to admin (suppress for test/stress users)
+                        if not uname.startswith(("test_", "stress_")):
+                            admin_msg = (
+                                f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
+                                f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
+                                f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
+                                f"💬 <b>Текст:</b>\n{html.escape(text)}"
+                            )
+                            tg_send_message(ADMIN_TG_ID, admin_msg)
 
                         # Confirm to user
                         tg_send_message(
                             chat_id,
                             "✅ <b>Спасибо!</b> Ваше сообщение успешно отправлено разработчику 💕\n"
                             "Мы ответим вам в ближайшее время прямо здесь в боте.",
-                            reply_markup=get_main_reply_keyboard()
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
                         )
                         continue
 
@@ -1120,27 +1259,50 @@ def telegram_polling_worker():
                             tg_send_message(
                                 chat_id,
                                 "❌ Партнёр с таким кодом не найден. Проверьте правильность кода и попробуйте снова:",
-                                reply_markup={"inline_keyboard": [[{"text": "🔄 Ввести код снова", "callback_data": "enter_pair_code"}]]}
+                                reply_markup={"inline_keyboard": [[{"text": "🔄 Ввести код снова", "callback_data": "enter_pair_code"}]]},
+                                uname=uname
                             )
                             continue
 
                         target_uname = target["username"]
+                        # Anti-Hijacking verification: caller or target already in a pair
+                        caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+                        if caller_partner and caller_partner != target_uname:
+                            tg_send_message(
+                                chat_id,
+                                "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
+                            )
+                            continue
+
+                        if target.get("partner_username") and target.get("partner_username") != uname:
+                            tg_send_message(
+                                chat_id,
+                                "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
+                            )
+                            continue
+
                         paired = pair_users(uname, target_uname)
                         if paired:
                             tg_send_message(
                                 chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{target['display_name']}</b> 💕\n\n"
+                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target['display_name'])}</b> 💕\n\n"
                                 "Откройте приложение «Двое», чтобы видеть общий счётчик и настроение партнёра!",
-                                reply_markup=get_main_reply_keyboard()
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
                             )
                             if target["tg_id"]:
                                 tg_send_message(
                                     target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{first_name}</b> соединился(-ась) с вами в приложении «Двое» 💕",
-                                    reply_markup=get_main_reply_keyboard()
+                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(first_name)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                                    reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                                    uname=target_uname
                                 )
                         else:
-                            tg_send_message(chat_id, "❌ Не удалось привязать пару. Попробуйте позже.", reply_markup=get_main_reply_keyboard())
+                            tg_send_message(chat_id, "❌ Не удалось привязать пару. Попробуйте позже.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
                         continue
 
                     # If user is in pair session but typed an invalid code (and didn't select a menu button)
@@ -1148,8 +1310,9 @@ def telegram_polling_worker():
                         tg_send_message(
                             chat_id,
                             "⚠️ <b>Неверный формат кода.</b>\n\n"
-                            "Отправьте код вашей второй половинки (например: <code>PAIR-1CAAF2</code> или 6 символов <code>1CAAF2</code>) либо нажмите «❌ Отмена»:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]]}
+                            "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code> или 6 символов <code>777LOVE</code>) либо нажмите «❌ Отмена»:",
+                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]]},
+                            uname=uname
                         )
                         continue
 
@@ -1165,17 +1328,19 @@ def telegram_polling_worker():
                                 )
                                 conn.commit()
                                 conn.close()
-                            admin_msg = (
-                                f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
-                                f"👤 <b>От:</b> {first_name} (@{uname})\n"
-                                f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
-                                f"💬 <b>Текст:</b>\n{inline_text}"
-                            )
-                            tg_send_message(ADMIN_TG_ID, admin_msg)
+                            if not uname.startswith(("test_", "stress_")):
+                                admin_msg = (
+                                    f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
+                                    f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
+                                    f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
+                                    f"💬 <b>Текст:</b>\n{html.escape(inline_text)}"
+                                )
+                                tg_send_message(ADMIN_TG_ID, admin_msg)
                             tg_send_message(
                                 chat_id,
                                 "✅ <b>Спасибо!</b> Ваше обращение передано разработчику 💕",
-                                reply_markup=get_main_reply_keyboard()
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
                             )
                         else:
                             with db_lock:
@@ -1223,7 +1388,7 @@ def telegram_polling_worker():
                             msg = (
                                 "🔗 <b>Привязка партнёра</b>\n\n"
                                 f"Ваш персональный код: <code>{inv_code}</code>\n\n"
-                                "Отправьте код вашей второй половинки (например: <code>PAIR-1CAAF2</code>) следующим сообщением:"
+                                "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) следующим сообщением:"
                             )
                             kb = [
                                 [{"text": "📤 Поделиться моим кодом", "url": share_url}],
@@ -1232,7 +1397,8 @@ def telegram_polling_worker():
                             tg_send_message(
                                 chat_id,
                                 msg,
-                                reply_markup={"inline_keyboard": kb}
+                                reply_markup={"inline_keyboard": kb},
+                                uname=uname
                             )
                             continue
 
@@ -1243,23 +1409,45 @@ def telegram_polling_worker():
                             conn.close()
 
                         if not target:
-                            tg_send_message(chat_id, "❌ Партнёр с таким кодом не найден. Проверьте правильность кода.", reply_markup=get_main_reply_keyboard())
+                            tg_send_message(chat_id, "❌ Партнёр с таким кодом не найден. Проверьте правильность кода.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
                             continue
 
                         target_uname = target["username"]
+                        # Anti-Hijacking verification: caller or target already in a pair
+                        caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+                        if caller_partner and caller_partner != target_uname:
+                            tg_send_message(
+                                chat_id,
+                                "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
+                            )
+                            continue
+
+                        if target.get("partner_username") and target.get("partner_username") != uname:
+                            tg_send_message(
+                                chat_id,
+                                "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
+                            )
+                            continue
+
                         paired = pair_users(uname, target_uname)
                         if paired:
                             tg_send_message(
                                 chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{target['display_name']}</b> 💕\n\n"
+                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target['display_name'])}</b> 💕\n\n"
                                 "Откройте приложение, чтобы увидеть ваш общий счётчик времени и настроение партнёра!",
-                                reply_markup=get_main_reply_keyboard()
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
                             )
                             if target["tg_id"]:
                                 tg_send_message(
                                     target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{first_name}</b> соединился(-ась) с вами в приложении «Двое» 💕",
-                                    reply_markup=get_main_reply_keyboard()
+                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(first_name)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                                    reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                                    uname=target_uname
                                 )
                         continue
 
@@ -1271,11 +1459,11 @@ def telegram_polling_worker():
                                 conn = get_db()
                                 p = conn.execute("SELECT tg_id FROM users WHERE username = ?", (p_uname,)).fetchone()
                                 conn.close()
-                            tg_send_message(chat_id, "💔 Вы отвязали партнёра. Теперь вы можете подключить новую пару.", reply_markup=get_main_reply_keyboard())
+                            tg_send_message(chat_id, "💔 Вы отвязали партнёра. Теперь вы можете подключить новую пару.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
                             if p and p["tg_id"]:
-                                tg_send_message(p["tg_id"], f"💔 Партнёр @{uname} отвязал пару.", reply_markup=get_main_reply_keyboard())
+                                tg_send_message(p["tg_id"], f"💔 Партнёр @{html.escape(uname)} отвязал пару.", reply_markup=get_main_reply_keyboard(chat_id=p["tg_id"], uname=p_uname), uname=p_uname)
                         else:
-                            tg_send_message(chat_id, "У вас нет привязанного партнёра.", reply_markup=get_main_reply_keyboard())
+                            tg_send_message(chat_id, "У вас нет привязанного партнёра.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
                         continue
 
                     # 7. Command: /start (including /start pair_<code>)
@@ -1295,14 +1483,31 @@ def telegram_polling_worker():
                             if target:
                                 target_uname = target["username"]
                                 inviter_name = (target["display_name"] or "").strip() or f"@{target_uname}"
-                                if pair_users(uname, target_uname):
-                                    paired_now = True
-                                    if target["tg_id"]:
-                                        tg_send_message(
-                                            target["tg_id"],
-                                            f"🎉 <b>{html.escape(first_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
-                                            reply_markup=get_main_reply_keyboard()
-                                        )
+                                caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+                                if caller_partner and caller_partner != target_uname:
+                                    tg_send_message(
+                                        chat_id,
+                                        "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                        uname=uname
+                                    )
+                                elif target.get("partner_username") and target.get("partner_username") != uname:
+                                    tg_send_message(
+                                        chat_id,
+                                        "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                        uname=uname
+                                    )
+                                else:
+                                    if pair_users(uname, target_uname):
+                                        paired_now = True
+                                        if target["tg_id"]:
+                                            tg_send_message(
+                                                target["tg_id"],
+                                                f"🎉 <b>{html.escape(first_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
+                                                reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                                                uname=target_uname
+                                            )
 
                         st = get_user_full_state(uname)
                         inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
@@ -1612,7 +1817,8 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
             tg_id = int(qs.get("tg_id", [0])[0]) if qs.get("tg_id") else None
             uname, tg_id = resolve_canonical_username(raw_uname, tg_id)
             if not uname and not tg_id:
-                uname = "ksjjfnnn"
+                self.send_json({"ok": False, "error": "Username or tg_id is required"}, 400)
+                return
 
             d_name = qs.get("displayName", [""])[0]
             photo_url = qs.get("photo_url", [""])[0]
@@ -1647,6 +1853,23 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "displayName": state["user"]["displayName"], "user": state["user"]})
             return
+
+        # Restore uploaded file from database if missing on disk (e.g. Render ephemeral filesystem)
+        if path.startswith("/uploads/"):
+            filename = os.path.basename(path)
+            target_path = os.path.join(UPLOADS_DIR, filename)
+            if filename and not os.path.exists(target_path):
+                try:
+                    with db_lock:
+                        conn = get_db()
+                        row = conn.execute("SELECT content FROM uploaded_files WHERE filename = ?", (filename,)).fetchone()
+                        conn.close()
+                    if row and row["content"]:
+                        os.makedirs(UPLOADS_DIR, exist_ok=True)
+                        with open(target_path, "wb") as f:
+                            f.write(row["content"])
+                except Exception as e:
+                    print(f"[Uploads Restore Error] {e}")
 
         # Fallback to static files
         super().do_GET()
@@ -1728,7 +1951,8 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                 tg_send_message(
                     p_row["tg_id"],
                     mood_msg,
-                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_current_webapp_url()}}]]}
+                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row["tg_id"], p_uname)}}]]},
+                    uname=p_uname
                 )
 
             state = get_user_full_state(uname)
@@ -1769,7 +1993,8 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                 tg_send_message(
                     p_row["tg_id"],
                     nudge_text,
-                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_current_webapp_url()}}]]}
+                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row["tg_id"], p_uname)}}]]},
+                    uname=p_uname
                 )
 
             state = get_user_full_state(uname)
@@ -1809,7 +2034,8 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                 tg_send_message(
                     p_row["tg_id"],
                     nudge_text,
-                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_current_webapp_url()}}]]}
+                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row["tg_id"], p_uname)}}]]},
+                    uname=p_uname
                 )
 
             state = get_user_full_state(uname)
@@ -1905,30 +2131,44 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
             with db_lock:
                 conn = get_db()
                 cur = conn.cursor()
+                caller_row = cur.execute("SELECT * FROM users WHERE username = ?", (uname,)).fetchone()
+                caller_dict = dict(caller_row) if caller_row else {}
                 if partner_code:
                     target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (partner_code, uname)).fetchone()
                 elif partner_target:
                     target = cur.execute("SELECT * FROM users WHERE username = ? AND username != ?", (partner_target, uname)).fetchone()
                 else:
                     target = None
+                target_dict = dict(target) if target else None
                 conn.close()
 
-            if not target:
+            if not target_dict:
                 self.send_json({"ok": False, "error": "Партнёр не найден по указанному коду"}, 404)
                 return
 
-            target_uname = target["username"]
+            target_uname = target_dict["username"]
+            caller_partner = caller_dict.get("partner_username")
+            if caller_partner and caller_partner != target_uname:
+                self.send_json({"ok": False, "error": "Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках."}, 400)
+                return
+
+            if target_dict.get("partner_username") and target_dict.get("partner_username") != uname:
+                self.send_json({"ok": False, "error": "Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках."}, 400)
+                return
+
             paired = pair_users(uname, target_uname)
             if not paired:
                 self.send_json({"ok": False, "error": "Не удалось соединить пару"}, 400)
                 return
 
-            # Optional notification to partner
-            if target["tg_id"]:
+            # Notification to partner in Telegram
+            if target_dict.get("tg_id"):
+                caller_display = (caller_dict.get("display_name") or "").strip() or f"@{uname}"
                 tg_send_message(
-                    target["tg_id"],
-                    f"🎉 <b>Поздравляем!</b> @{uname} соединился(-ась) с вами в приложении «Двое» 💕",
-                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_current_webapp_url()}}]]}
+                    target_dict["tg_id"],
+                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(target_dict['tg_id'], target_uname)}}]]},
+                    uname=target_uname
                 )
 
             state = get_user_full_state(uname)
@@ -1944,7 +2184,12 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                     p = conn.execute("SELECT tg_id FROM users WHERE username = ?", (p_uname,)).fetchone()
                     conn.close()
                 if p and p["tg_id"]:
-                    tg_send_message(p["tg_id"], f"💔 Партнёр @{uname} отвязал пару.")
+                    tg_send_message(
+                        p["tg_id"],
+                        f"💔 Партнёр @{html.escape(uname)} отвязал пару.",
+                        reply_markup=get_main_reply_keyboard(chat_id=p["tg_id"], uname=p_uname),
+                        uname=p_uname
+                    )
 
             state = get_user_full_state(uname)
             self.send_json({"ok": True, "state": state})
@@ -1972,15 +2217,16 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
                 conn.commit()
                 conn.close()
 
-            # Forward to admin
-            admin_msg = (
-                f"📩 <b>Новое обращение из приложения «Двое»!</b>\n\n"
-                f"👤 <b>От:</b> {d_name} (@{uname})\n"
-                f"🆔 <b>TG ID:</b> <code>{user_tg_id}</code>\n"
-                f"🏷 <b>Категория:</b> {cat}\n\n"
-                f"💬 <b>Текст:</b>\n{msg_text}"
-            )
-            tg_send_message(ADMIN_TG_ID, admin_msg)
+            # Forward to admin (suppress for test/stress accounts)
+            if not uname.startswith(("test_", "stress_")):
+                admin_msg = (
+                    f"📩 <b>Новое обращение из приложения «Двое»!</b>\n\n"
+                    f"👤 <b>От:</b> {html.escape(str(d_name))} (@{html.escape(str(uname))})\n"
+                    f"🆔 <b>TG ID:</b> <code>{user_tg_id}</code>\n"
+                    f"🏷 <b>Категория:</b> {html.escape(str(cat))}\n\n"
+                    f"💬 <b>Текст:</b>\n{html.escape(str(msg_text))}"
+                )
+                tg_send_message(ADMIN_TG_ID, admin_msg)
 
             self.send_json({"ok": True, "message": "Обращение успешно отправлено разработчику"})
             return
@@ -2008,6 +2254,10 @@ def main():
     # Spawn Menu Button Syncer Thread
     t_menu = threading.Thread(target=update_menu_button_periodically, daemon=True)
     t_menu.start()
+
+    # Spawn Keep-Alive Worker for Render
+    t_keepalive = threading.Thread(target=keep_alive_worker, daemon=True)
+    t_keepalive.start()
 
     # Start HTTP Server
     server = ThreadingHTTPServer(("0.0.0.0", PORT), DvoeHTTPHandler)
