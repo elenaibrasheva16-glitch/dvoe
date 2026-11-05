@@ -1,0 +1,141 @@
+/* ============================================================================
+   ChibiLove (ЧибиПара) — High-DPI Vector SVG Kinematic Engine Styles
+   60 FPS GPU-accelerated transforms, zero-seam layer transitions & crispness
+   ============================================================================ */
+
+.chibi-svg-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  touch-action: none;
+  overflow: hidden;
+  cursor: grab;
+  border-radius: 24px;
+  background: transparent;
+  transition: background 0.4s ease;
+}
+
+.chibi-svg-stage:active {
+  cursor: grabbing;
+}
+
+.chibi-svg-viewport {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  pointer-events: auto;
+  overflow: visible;
+  shape-rendering: geometricPrecision;
+  text-rendering: geometricPrecision;
+}
+
+/* GPU Hardware Acceleration on Kinematic SVG Groups */
+.chibi-svg-root {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+.chibi-svg-head {
+  transform-box: fill-box;
+  transform-origin: 50% 85%;
+  will-change: transform;
+}
+
+.chibi-svg-ears {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
+.chibi-svg-tail {
+  transform-box: fill-box;
+  transform-origin: 20% 90%;
+  will-change: transform;
+}
+
+.chibi-svg-eyes {
+  will-change: transform;
+}
+
+.chibi-svg-pupil {
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform;
+  transition: transform 0.08s ease-out;
+}
+
+.chibi-svg-blush {
+  will-change: opacity;
+  transition: opacity 0.15s ease-out;
+}
+
+.chibi-svg-mouth {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.chibi-svg-paws {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+/* Night / Sleep Dimming Filter */
+.chibi-svg-night-overlay {
+  transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+/* Thought / Speech Bubble */
+.chibi-svg-bubble {
+  position: absolute;
+  top: 6%;
+  left: 50%;
+  transform: translate(-50%, 0) scale(1);
+  background: rgba(255, 255, 255, 0.98);
+  color: #9F1239;
+  font-size: 13.5px;
+  font-weight: 800;
+  padding: 8px 18px;
+  border-radius: 99px;
+  border: 2px solid #FDA4AF;
+  box-shadow: 0 8px 24px rgba(244, 63, 94, 0.22);
+  pointer-events: none;
+  z-index: 25;
+  white-space: nowrap;
+  animation: chibiSvgBubblePop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Nunito', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.chibi-svg-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 8px 7px 0 7px;
+  border-style: solid;
+  border-color: #FDA4AF transparent transparent transparent;
+}
+
+@keyframes chibiSvgBubblePop {
+  0% { opacity: 0; transform: translate(-50%, 12px) scale(0.65); }
+  70% { opacity: 1; transform: translate(-50%, -3px) scale(1.08); }
+  100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+/* Vector Heart and Star Particles */
+.chibi-svg-particle {
+  pointer-events: none;
+  will-change: transform, opacity;
+}

@@ -1,0 +1,2598 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ChibiLove (ЧибиПара) — Backend Server & Telegram Bot (Mini App)
+Features:
+- Clean Couples Economy (R4): clothing, accessory, and cosmetic stores strictly removed.
+- Hearts Economy:
+  • Exactly 200 hearts starting balance automatically granted to every registered / existing couple (free first streak restore).
+  • Daily reward: reliable +10 hearts daily claim mechanism with streak protection check (/api/claim-daily).
+  • Streak & relationship restoration: dedicated endpoint (/api/restore-streak) costing exactly 200 hearts.
+- Account linking via Telegram @username with confirmation requests.
+- Stage-based care system (4 stages, no percentages) + 24h Streak ("Огонёк любви 🔥").
+- 8 soft pastel backgrounds for couple and individual room views.
+"""
+
+import json
+import os
+import random
+import socket
+import sqlite3
+import threading
+import time
+import urllib.parse
+import urllib.request
+import requests
+from datetime import datetime, timezone
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+# Auto-detect local proxy (e.g. PacketTunnel/v2ray on 10809) for Telegram API
+def setup_local_proxy_if_available():
+    for port in (10809, 7890, 1087):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.2)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    os.environ["HTTP_PROXY"] = f"http://127.0.0.1:{port}"
+                    os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{port}"
+                    os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
+                    print(f"[Proxy] Using local proxy on 127.0.0.1:{port} for Telegram API")
+                    break
+        except Exception:
+            pass
+
+setup_local_proxy_if_available()
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "9265259467:AAHoLLQJKFknBZJkWUsBLXE0RJsuoc0zafw")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "ChibiLovePara_bot")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "ksjjfnnn")
+ADMIN_TG_ID = int(os.environ.get("ADMIN_TG_ID", "8565474570"))
+PORT = int(os.environ.get("PORT", "8085"))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")
+DB_PATH = os.path.join(BASE_DIR, "backend", "chibilove.db")
+TUNNEL_URL_FILE = os.path.join(BASE_DIR, "backend", "tunnel_url.txt")
+
+PASTEL_THEMES = [
+    "pink",      # Розовый
+    "green",     # Зелёный
+    "blue",      # Голубой
+    "yellow",    # Жёлтый
+    "lime",      # Салатовый
+    "purple",    # Фиолетовый
+    "orange",    # Оранжевый
+    "rainbow",   # Радужный
+]
+
+POSES = [
+    "hug",             # Объятия
+    "hold_hands",      # Держатся за ручки
+    "pat_a_to_b",      # Партнёр 1 гладит по голове Партнёра 2
+    "pat_b_to_a",      # Партнёр 2 гладит по голове Партнёра 1
+    "dance",           # Весёлый синхронный танец чибиков (как Kanna!)
+    "sleep_together",  # Уютно спят в обнимку под звёздами
+]
+
+# R4 Clean Couples Economy: all clothing, accessory, and cosmetic purchases/stores removed
+DEFAULT_FREE_ACCESSORIES = []
+ACCESSORY_PRICES = {}
+
+# Telegram Stars packages (1 Star = 10 Hearts)
+# 20 Stars = 200 Hearts (exact cost of restoring partner)
+# Hearts are used exclusively for pair & streak restoration (200 Hearts)
+STARS_PACKAGES = {
+    "stars_20": {"stars": 20, "hearts": 200, "title": "200 Сердечек 💕", "desc": "Восстановление пары при пропуске 24 часов"},
+    "stars_50": {"stars": 50, "hearts": 500, "title": "500 Сердечек 💕", "desc": "Запас сердечек для вашей пары"},
+    "stars_100": {"stars": 100, "hearts": 1000, "title": "1000 Сердечек 💕", "desc": "Большой запас сердечек для спокойствия и восстановления пары"},
+}
+
+RESTORE_PARTNER_COST_HEARTS = 200  # Exactly 200 Hearts to restore broken streak/couple
+INITIAL_FREE_HEARTS = 200          # Automatically 200 Hearts at start (free first streak restore)
+STREAK_TIMEOUT_SECONDS = 86400     # 24 hours without care -> partner leaves!
+DAILY_HEARTS_REWARD = 10           # Reliable +10 Hearts daily reward!
+AVATAR_IMAGE_PATH = os.path.join(PUBLIC_DIR, "img", "bot_avatar.jpg")
+BANNER_IMAGE_PATH = os.path.join(PUBLIC_DIR, "img", "bot_description_640x360.jpg")
+
+# 10 Milestones of Flame Evolution up to 1 year
+FLAME_STAGES = [
+    {
+        "tier": 1,
+        "minDays": 1,
+        "id": "spark",
+        "name": "Искорка",
+        "title": "✨ Крошечная Искорка",
+        "badge": "1-й уровень",
+        "desc": "Тёплый огонёк первого знакомства. Прыгает вокруг вашей пары и согревает первыми искрами.",
+        "icon": "✨",
+        "color": "#F59E0B",
+        "nextDays": 3,
+    },
+    {
+        "tier": 2,
+        "minDays": 3,
+        "id": "flamelet",
+        "name": "Озорной Огонёк",
+        "title": "🔥 Озорной Огонёк",
+        "badge": "2-й уровень",
+        "desc": "Огонёк окреп и стал игривым! У него появился виляющий хвостик, милый румянец и блестящие глазки.",
+        "icon": "🔥",
+        "color": "#F97316",
+        "nextDays": 7,
+    },
+    {
+        "tier": 3,
+        "minDays": 7,
+        "id": "crowned",
+        "name": "Коронованный Пламенек",
+        "title": "👑 Коронованный Пламенек",
+        "badge": "3-й уровень (1 неделя)",
+        "desc": "Неделя неразлучны! Над огоньком засияла парящая золотая корона с драгоценным рубином.",
+        "icon": "👑",
+        "color": "#EAB308",
+        "nextDays": 14,
+    },
+    {
+        "tier": 4,
+        "minDays": 14,
+        "id": "kitsune",
+        "name": "Огненный Лис-Дух",
+        "title": "🦊 Огненный Лис-Дух",
+        "badge": "4-й уровень (2 недели)",
+        "desc": "Две недели любви! Питомец превратился в милого духа-кицунэ со светящимися ушками и двойным хвостом.",
+        "icon": "🦊",
+        "color": "#FF6B35",
+        "nextDays": 21,
+    },
+    {
+        "tier": 5,
+        "minDays": 21,
+        "id": "cosmic",
+        "name": "Звёздный Огонёк",
+        "title": "⭐ Звёздный Огонёк",
+        "badge": "5-й уровень (3 недели)",
+        "desc": "Три недели вместе! Вокруг питомца по своей орбите вращаются две мерцающие звёздочки-спутника.",
+        "icon": "⭐",
+        "color": "#A855F7",
+        "nextDays": 28,
+    },
+    {
+        "tier": 6,
+        "minDays": 28,
+        "id": "guardian",
+        "name": "Пламенный Хранитель",
+        "title": "🕊️ Пламенный Хранитель",
+        "badge": "6-й уровень (1 месяц)",
+        "desc": "Целый месяц вместе! Огонёк расправил огненные крылышки и оберегает пару кристальным сердечком.",
+        "icon": "🕊️",
+        "color": "#EC4899",
+        "nextDays": 60,
+    },
+    {
+        "tier": 7,
+        "minDays": 60,
+        "id": "aurora",
+        "name": "Аврора Любви",
+        "title": "🌈 Аврора Любви",
+        "badge": "7-й уровень (2 месяца)",
+        "desc": "Два месяца нерушимой связи! Пламя переливается нежными красками полярного сияния.",
+        "icon": "🌈",
+        "color": "#06B6D4",
+        "nextDays": 90,
+    },
+    {
+        "tier": 8,
+        "minDays": 90,
+        "id": "drake",
+        "name": "Дракончик Пламени",
+        "title": "🐉 Дракончик Пламени",
+        "badge": "8-й уровень (3 месяца)",
+        "desc": "Квартал счастья! Питомец вырос в милого ручного дракончика с золотыми рожками и мембранными крыльями.",
+        "icon": "🐉",
+        "color": "#EF4444",
+        "nextDays": 180,
+    },
+    {
+        "tier": 9,
+        "minDays": 180,
+        "id": "eternal",
+        "name": "Вечное Сердце",
+        "title": "💎 Вечное Сердце",
+        "badge": "9-й уровень (полгода)",
+        "desc": "Полгода любви! В сердцевине пламени ярко пульсирует граненый рубин в защитном кольце рун.",
+        "icon": "💎",
+        "color": "#BE123C",
+        "nextDays": 365,
+    },
+    {
+        "tier": 10,
+        "minDays": 365,
+        "id": "phoenix",
+        "name": "Солнечный Феникс",
+        "title": "☀️ Солнечный Феникс",
+        "badge": "Легендарный (1 год!)",
+        "desc": "Год нерушимой любви! Легендарный золотой феникс с лучистым солнечным венцом и вечным шлейфом.",
+        "icon": "☀️",
+        "color": "#F59E0B",
+        "nextDays": None,
+    },
+]
+
+
+def get_flame_stage_info(days_together: int, partner_left: bool = False) -> dict:
+    days = max(1, int(days_together or 1))
+    current_stage = FLAME_STAGES[0]
+    for s in FLAME_STAGES:
+        if days >= s["minDays"]:
+            current_stage = s
+        else:
+            break
+
+    next_stage = None
+    curr_idx = FLAME_STAGES.index(current_stage)
+    if curr_idx + 1 < len(FLAME_STAGES):
+        next_stage = FLAME_STAGES[curr_idx + 1]
+
+    days_in_tier = days - current_stage["minDays"]
+    tier_span = (next_stage["minDays"] - current_stage["minDays"]) if next_stage else 1
+    progress_pct = 100 if not next_stage else min(100, int((days_in_tier / max(1, tier_span)) * 100))
+    days_to_next = (next_stage["minDays"] - days) if next_stage else 0
+
+    return {
+        "tier": current_stage["tier"],
+        "id": current_stage["id"],
+        "name": current_stage["name"],
+        "title": current_stage["title"],
+        "badge": current_stage["badge"],
+        "desc": current_stage["desc"],
+        "icon": current_stage["icon"],
+        "color": current_stage["color"],
+        "minDays": current_stage["minDays"],
+        "nextDays": next_stage["minDays"] if next_stage else None,
+        "nextName": next_stage["name"] if next_stage else None,
+        "daysToNext": max(0, days_to_next),
+        "progressPct": progress_pct,
+        "isExtinguished": bool(partner_left),
+    }
+
+
+# =============================================================================
+# EXACT CALENDAR MATH ENGINE (Years, Months, Days, Hours, Minutes, Seconds)
+# Mathematically exact month-clamped advancement handling leap years & timezones
+# =============================================================================
+def is_leap_year(year: int) -> bool:
+    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+
+
+def days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        return 29 if is_leap_year(year) else 28
+    if month in (4, 6, 9, 11):
+        return 30
+    return 31
+
+
+def add_months_clamped(dt: datetime, months: int) -> datetime:
+    total_months = dt.year * 12 + (dt.month - 1) + months
+    target_year = total_months // 12
+    target_month = (total_months % 12) + 1
+    max_d = days_in_month(target_year, target_month)
+    day = min(dt.day, max_d)
+    return dt.replace(year=target_year, month=target_month, day=day)
+
+
+RELATIONSHIP_MILESTONES = [
+    {"days": 7, "title": "Первая неделя вместе", "badge": "7 дней", "icon": "🌸", "desc": "Первые совместные дни и сладкие моменты!"},
+    {"days": 30, "title": "Первый месяц любви", "badge": "1 месяц", "icon": "🕊️", "desc": "Целый месяц рука об руку!"},
+    {"days": 50, "title": "50 дней нежности", "badge": "50 дней", "icon": "💖", "desc": "Ваша связь крепнет с каждым днём!"},
+    {"days": 100, "title": "100 дней вместе 💕", "badge": "100 дней", "icon": "💯", "desc": "Первая сотня незабываемых моментов!"},
+    {"days": 200, "title": "200 дней счастья ✨", "badge": "200 дней", "icon": "✨", "desc": "Двойная сотня тёплых воспоминаний!"},
+    {"days": 300, "title": "300 дней тепла ☀️", "badge": "300 дней", "icon": "☀️", "desc": "Почти год безграничной любви!"},
+    {"days": 365, "title": "1 Год вместе! 🎂", "badge": "1 год", "icon": "🎂", "desc": "Сияющий юбилей — первый совместный год!"},
+    {"days": 500, "title": "500 дней преданности 💎", "badge": "500 дней", "icon": "💎", "desc": "Полтысячи дней нерушимого доверия!"},
+    {"days": 730, "title": "2 Года любви! 👑", "badge": "2 года", "icon": "👑", "desc": "Два прекрасных года нежности!"},
+    {"days": 1000, "title": "1000 дней легенды! 🏆", "badge": "1000 дней", "icon": "🏆", "desc": "Легендарная пара, вдохновляющая весь мир!"},
+]
+
+
+def calculate_anniversary_stats(anniversary_val, current_ts: float = None) -> dict:
+    if current_ts is None:
+        current_ts = time.time()
+
+    if isinstance(anniversary_val, (int, float)):
+        start_ts = float(anniversary_val)
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+    elif isinstance(anniversary_val, str) and anniversary_val.strip():
+        val = anniversary_val.strip()
+        try:
+            if "T" in val:
+                start_dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            else:
+                parts = val.split("-")
+                start_dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]), 0, 0, 0, tzinfo=timezone.utc)
+            start_ts = start_dt.timestamp()
+        except Exception:
+            start_ts = current_ts
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+    else:
+        start_ts = current_ts
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+
+    end_dt = datetime.fromtimestamp(current_ts, tz=timezone.utc)
+    is_future = current_ts < start_ts
+    t0 = end_dt if is_future else start_dt
+    t1 = start_dt if is_future else end_dt
+
+    y = t1.year - t0.year
+    p = add_months_clamped(t0, y * 12)
+    if p > t1:
+        y -= 1
+        p = add_months_clamped(t0, y * 12)
+
+    m = 0
+    while True:
+        next_p = add_months_clamped(p, 1)
+        if next_p <= t1:
+            m += 1
+            p = next_p
+        else:
+            break
+
+    rem_seconds = int((t1 - p).total_seconds())
+    d = rem_seconds // 86400
+    rem_seconds %= 86400
+    h = rem_seconds // 3600
+    rem_seconds %= 3600
+    minute = rem_seconds // 60
+    s = rem_seconds % 60
+
+    total_seconds = max(0, int(abs(current_ts - start_ts)))
+    total_days = max(1, total_seconds // 86400 + (0 if is_future else 1))
+    total_hours = total_seconds // 3600
+
+    milestones_list = []
+    next_milestone = None
+    prev_days = 0
+    for m_def in RELATIONSHIP_MILESTONES:
+        m_days = m_def["days"]
+        completed = total_days >= m_days
+        item = {
+            "days": m_days,
+            "title": m_def["title"],
+            "badge": m_def["badge"],
+            "icon": m_def["icon"],
+            "desc": m_def["desc"],
+            "completed": completed,
+            "daysLeft": max(0, m_days - total_days)
+        }
+        milestones_list.append(item)
+        if not completed and next_milestone is None:
+            span = max(1, m_days - prev_days)
+            elapsed_in_span = max(0, total_days - prev_days)
+            item["progressPct"] = min(100.0, round((elapsed_in_span / span) * 100.0, 1))
+            next_milestone = item
+        if completed:
+            prev_days = m_days
+
+    if next_milestone is None:
+        next_milestone = {
+            "days": 1000,
+            "title": "Легендарная любовь! 👑",
+            "badge": "1000+ дней",
+            "icon": "👑",
+            "desc": "Вы прошли все рубежи легендарной пары!",
+            "completed": True,
+            "daysLeft": 0,
+            "progressPct": 100.0
+        }
+
+    return {
+        "years": max(0, y),
+        "months": max(0, m),
+        "days": max(0, d),
+        "hours": max(0, h),
+        "minutes": max(0, minute),
+        "seconds": max(0, s),
+        "totalDays": total_days,
+        "totalHours": total_hours,
+        "isFuture": is_future,
+        "anniversaryTimestamp": start_ts,
+        "anniversaryDateISO": start_dt.strftime("%Y-%m-%d"),
+        "anniversaryFormatted": start_dt.strftime("%d.%m.%Y"),
+        "nextMilestone": next_milestone,
+        "milestones": milestones_list,
+    }
+
+
+DEFAULT_PET = {
+    "species": "kitty_bear",
+    "name": "Зефирка",
+    "gender": "girl",
+    "bgColor": "pink",
+}
+
+DEFAULT_AVATAR_GIRL = dict(DEFAULT_PET)
+DEFAULT_AVATAR_BOY = {
+    "species": "puppy",
+    "name": "Пончик",
+    "gender": "boy",
+    "bgColor": "yellow",
+}
+
+db_lock = threading.RLock()
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA busy_timeout = 30000;")
+        cur.execute("PRAGMA synchronous = NORMAL;")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                tg_id INTEGER,
+                display_name TEXT,
+                bg_color TEXT,
+                mood TEXT DEFAULT 'happy',
+                avatar_configured INTEGER DEFAULT 0,
+                avatar_json TEXT,
+                care_hunger REAL DEFAULT 92.0,
+                care_clean REAL DEFAULT 94.0,
+                care_energy REAL DEFAULT 92.0,
+                is_sleeping INTEGER DEFAULT 0,
+                last_care_update REAL,
+                partner_accessories_json TEXT DEFAULT '[]',
+                unlocked_accessories_json TEXT,
+                hearts INTEGER DEFAULT 200,
+                partner_username TEXT DEFAULT NULL,
+                couple_pose TEXT DEFAULT 'hug',
+                streak_days INTEGER DEFAULT 1,
+                last_cared_at REAL,
+                last_streak_day TEXT DEFAULT '',
+                partner_left INTEGER DEFAULT 0,
+                paired_at REAL,
+                anniversary_date TEXT DEFAULT '',
+                mood_label TEXT DEFAULT '',
+                mood_tag TEXT DEFAULT '',
+                mood_updated_at REAL DEFAULT 0,
+                mood_reaction TEXT DEFAULT '',
+                mood_reaction_from TEXT DEFAULT '',
+                mood_reaction_at REAL DEFAULT 0,
+                last_heart_reward_day TEXT DEFAULT '',
+                free_restore_used INTEGER DEFAULT 0,
+                created_at REAL
+            )
+        """)
+        # Migrate existing columns safely if upgrading from earlier DB
+        existing_cols = {r["name"] for r in cur.execute("PRAGMA table_info(users)").fetchall()}
+        now = time.time()
+        if "streak_days" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN streak_days INTEGER DEFAULT 1")
+        if "last_cared_at" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN last_cared_at REAL")
+            cur.execute("UPDATE users SET last_cared_at = ?", (now,))
+        if "last_streak_day" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN last_streak_day TEXT DEFAULT ''")
+        if "partner_left" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN partner_left INTEGER DEFAULT 0")
+        if "paired_at" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN paired_at REAL")
+            cur.execute("UPDATE users SET paired_at = COALESCE(created_at, ?) WHERE partner_username IS NOT NULL AND paired_at IS NULL", (now,))
+        if "last_heart_reward_day" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN last_heart_reward_day TEXT DEFAULT ''")
+        if "free_restore_used" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN free_restore_used INTEGER DEFAULT 0")
+        if "mood_reason" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_reason TEXT DEFAULT ''")
+        if "mood_label" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_label TEXT DEFAULT ''")
+        if "mood_tag" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_tag TEXT DEFAULT ''")
+        if "mood_updated_at" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_updated_at REAL DEFAULT 0")
+        if "mood_reaction" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_reaction TEXT DEFAULT ''")
+        if "mood_reaction_from" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_reaction_from TEXT DEFAULT ''")
+        if "mood_reaction_at" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN mood_reaction_at REAL DEFAULT 0")
+        if "anniversary_date" not in existing_cols:
+            cur.execute("ALTER TABLE users ADD COLUMN anniversary_date TEXT DEFAULT ''")
+
+        # R4 Clean Couples Economy migrations:
+        # 1. Ensure all users have exactly at least 200 free hearts at start (and reset legacy 250 defaults)
+        cur.execute("UPDATE users SET hearts = 200 WHERE hearts < 200 OR hearts = 250")
+        # 2. Clear out legacy accessories records
+        cur.execute("UPDATE users SET partner_accessories_json = '[]', unlocked_accessories_json = '[]'")
+
+        # Migrate user avatars to pets if missing species
+        rows = cur.execute("SELECT * FROM users").fetchall()
+        for r in rows:
+            try:
+                av = json.loads(r["avatar_json"] or "{}") if "avatar_json" in r.keys() else {}
+                if "species" not in av:
+                    av["species"] = "kitty_bear" if av.get("gender") == "girl" else "puppy"
+                    if "name" not in av:
+                        av["name"] = "Зефирка"
+                    cur.execute("UPDATE users SET avatar_json = ? WHERE username = ?", (json.dumps(av, ensure_ascii=False), r["username"]))
+            except Exception:
+                pass
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pair_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_username TEXT,
+                from_name TEXT,
+                to_username TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS care_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                couple_key TEXT,
+                actor_username TEXT,
+                text TEXT,
+                created_at REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_payments (
+                charge_id TEXT PRIMARY KEY,
+                username TEXT,
+                stars INTEGER,
+                hearts INTEGER,
+                created_at REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS support_sessions (
+                tg_id INTEGER PRIMARY KEY,
+                mode TEXT,
+                target_tg_id INTEGER,
+                updated_at REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER,
+                username TEXT,
+                display_name TEXT,
+                message_text TEXT,
+                created_at REAL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+
+def normalize_username(u: str) -> str:
+    if not u:
+        return ""
+    u = u.strip().lstrip("@").lower()
+    return "".join(ch for ch in u if ch.isalnum() or ch == "_")
+
+
+def couple_key_for(u1: str, u2: str) -> str:
+    a, b = sorted([normalize_username(u1), normalize_username(u2)])
+    return f"{a}:{b}"
+
+
+class SyncEventManager:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._events = []
+        self._next_id = 1
+
+    def publish(self, actor: str, target: str = None, event_type: str = "care_action", data: dict = None):
+        with self._cond:
+            eid = self._next_id
+            self._next_id += 1
+            ev = {
+                "id": eid,
+                "actor": normalize_username(actor),
+                "target": normalize_username(target) if target else None,
+                "type": event_type,
+                "data": data or {},
+                "timestamp": time.time(),
+            }
+            self._events.append(ev)
+            if len(self._events) > 200:
+                self._events = self._events[-200:]
+            self._cond.notify_all()
+            return ev
+
+    def get_events_since(self, username: str, since_id: int = 0, wait_seconds: float = 0.0) -> tuple:
+        uname = normalize_username(username)
+        partner_uname = None
+        with db_lock:
+            conn = get_db()
+            row = conn.execute("SELECT partner_username FROM users WHERE username = ?", (uname,)).fetchone()
+            conn.close()
+            if row and row["partner_username"]:
+                partner_uname = normalize_username(row["partner_username"])
+
+        def collect():
+            relevant = []
+            max_id = since_id
+            for ev in self._events:
+                if ev["id"] > since_id:
+                    ev_actor = ev["actor"]
+                    ev_target = ev.get("target")
+                    if ev_actor in (uname, partner_uname) or (ev_target and ev_target in (uname, partner_uname)):
+                        relevant.append(ev)
+                    if ev["id"] > max_id:
+                        max_id = ev["id"]
+            return max_id, relevant
+
+        with self._cond:
+            max_id, evs = collect()
+            if evs or wait_seconds <= 0.0:
+                return max_id, evs
+            self._cond.wait(timeout=min(wait_seconds, 5.0))
+            return collect()
+
+
+sync_manager = SyncEventManager()
+
+
+def get_current_webapp_url() -> str:
+    if os.path.exists(TUNNEL_URL_FILE):
+        try:
+            with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
+                url = f.read().strip()
+                if url.startswith("https://"):
+                    return url
+        except Exception:
+            pass
+    return f"http://localhost:{PORT}"
+
+
+_tg_session = requests.Session()
+
+
+def tg_api_call(method: str, payload: dict):
+    if not BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    call_timeout = 25 if method == "getUpdates" else 15
+    proxies = None
+    if os.environ.get("HTTP_PROXY"):
+        proxies = {
+            "http": os.environ["HTTP_PROXY"],
+            "https": os.environ["HTTPS_PROXY"],
+        }
+    try:
+        resp = _tg_session.post(url, json=payload, proxies=proxies, timeout=call_timeout)
+        return resp.json()
+    except Exception as e:
+        print(f"[TG API Error] {method}: {e}")
+        return None
+
+
+def tg_send_photo(chat_id: int, photo_path: str, caption: str, reply_markup: dict = None):
+    if not BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    data = {
+        "chat_id": chat_id,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    proxies = None
+    if os.environ.get("HTTP_PROXY"):
+        proxies = {
+            "http": os.environ["HTTP_PROXY"],
+            "https": os.environ["HTTPS_PROXY"],
+        }
+    try:
+        if os.path.exists(photo_path):
+            with open(photo_path, "rb") as f:
+                files = {"photo": (os.path.basename(photo_path), f, "image/jpeg")}
+                resp = _tg_session.post(url, data=data, files=files, proxies=proxies, timeout=18)
+                res_json = resp.json()
+                if res_json.get("ok"):
+                    return res_json
+                print(f"[TG sendPhoto API Error] {res_json}")
+    except Exception as e:
+        print(f"[TG sendPhoto Exception] {e}")
+
+    # Fallback to sendMessage if photo upload fails or file missing
+    payload = {
+        "chat_id": chat_id,
+        "text": caption,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return tg_api_call("sendMessage", payload)
+
+
+def notify_user_tg(username: str, text: str, reply_markup: dict = None):
+    uname = normalize_username(username)
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT tg_id FROM users WHERE username = ?", (uname,)).fetchone()
+        conn.close()
+    if row and row["tg_id"]:
+        payload = {
+            "chat_id": row["tg_id"],
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        threading.Thread(target=tg_api_call, args=("sendMessage", payload), daemon=True).start()
+
+
+def value_to_stage(val: float, kind: str) -> dict:
+    """Maps internal 0..100 care metric to 4 discrete human-readable stages with percentage and value."""
+    val_float = float(val if val is not None else 80.0)
+    if val_float >= 75.0:
+        stage = 4
+    elif val_float >= 50.0:
+        stage = 3
+    elif val_float >= 25.0:
+        stage = 2
+    else:
+        stage = 1
+
+    labels = {
+        "hunger": {
+            4: "Сыт и доволен",
+            3: "Проголодался",
+            2: "Голодный",
+            1: "Очень голоден!",
+        },
+        "clean": {
+            4: "Сияет чистотой",
+            3: "Опрятный",
+            2: "Пора в душ",
+            1: "Чумазый!",
+        },
+        "energy": {
+            4: "Полон сил",
+            3: "Бодрый",
+            2: "Сонный",
+            1: "Устал без сил!",
+        }
+    }
+    pct = max(0, min(100, int(round(val_float))))
+    return {
+        "stage": stage,
+        "maxStage": 4,
+        "label": labels[kind][stage],
+        "value": round(val_float, 1),
+        "percent": pct,
+    }
+
+
+def ensure_user(username: str, display_name: str = None, tg_id: int = None) -> dict:
+    uname = normalize_username(username)
+    if not uname:
+        uname = "ksjjfnnn"
+    now = time.time()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (uname,)).fetchone()
+        if not row:
+            random_bg = random.choice(PASTEL_THEMES)
+            default_av = dict(DEFAULT_AVATAR_BOY)
+            if display_name and display_name.strip():
+                default_av["name"] = display_name.strip()
+            else:
+                default_av["name"] = f"@{uname}"
+            conn.execute("""
+                INSERT INTO users (
+                    username, tg_id, display_name, bg_color, mood, avatar_configured,
+                    avatar_json, care_hunger, care_clean, care_energy, is_sleeping,
+                    last_care_update, partner_accessories_json, unlocked_accessories_json,
+                    hearts, partner_username, couple_pose, streak_days, last_cared_at,
+                    last_streak_day, partner_left, last_heart_reward_day, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                uname,
+                tg_id,
+                display_name or uname,
+                random_bg,
+                "happy",
+                0,
+                json.dumps(default_av, ensure_ascii=False),
+                92.0,
+                94.0,
+                92.0,
+                0,
+                now,
+                json.dumps([]),
+                json.dumps([]),
+                INITIAL_FREE_HEARTS,
+                None,
+                random.choice(POSES),
+                1,
+                now,
+                today_str,
+                0,
+                "",
+                now
+            ))
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (uname,)).fetchone()
+        else:
+            updates = []
+            params = []
+            if tg_id and row["tg_id"] != tg_id:
+                updates.append("tg_id = ?")
+                params.append(tg_id)
+            if display_name and display_name.strip() and (not row["display_name"] or row["display_name"] == uname):
+                updates.append("display_name = ?")
+                params.append(display_name.strip())
+            if not row["last_cared_at"]:
+                updates.append("last_cared_at = ?")
+                params.append(now)
+            if updates:
+                params.append(uname)
+                conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE username = ?", tuple(params))
+                conn.commit()
+                row = conn.execute("SELECT * FROM users WHERE username = ?", (uname,)).fetchone()
+        conn.close()
+    return apply_decay_and_serialize(row)
+
+
+def apply_decay_and_serialize(row) -> dict:
+    if not row:
+        return None
+    d = dict(row)
+    now = time.time()
+    last = d.get("last_care_update") or now
+    elapsed_hours = max(0.0, (now - last) / 3600.0)
+    hunger = float(d.get("care_hunger", 90.0))
+    clean = float(d.get("care_clean", 90.0))
+    energy = float(d.get("care_energy", 90.0))
+    is_sleeping = int(d.get("is_sleeping", 0))
+
+    last_cared_at = d.get("last_cared_at") or now
+    partner_left = int(d.get("partner_left") or 0)
+    paired_at = d.get("paired_at") or d.get("created_at") or now
+    anniversary_val = d.get("anniversary_date") or paired_at
+    anniversary_stats = calculate_anniversary_stats(anniversary_val, now)
+
+    # Check 24-hour neglect rule: if paired and >24h passed since last care, partner leaves!
+    if d.get("partner_username") and not partner_left:
+        if (now - last_cared_at) >= STREAK_TIMEOUT_SECONDS:
+            partner_left = 1
+            with db_lock:
+                conn = get_db()
+                conn.execute("UPDATE users SET partner_left = 1 WHERE username = ?", (d["username"],))
+                conn.commit()
+                conn.close()
+
+    # Calculate exact days together & live anniversary stats
+    effective_time = (last_cared_at + STREAK_TIMEOUT_SECONDS) if partner_left else now
+    days_together = anniversary_stats["totalDays"]
+    paired_date_str = anniversary_stats["anniversaryFormatted"]
+
+    if elapsed_hours > 0.02:
+        # Smoothly decays across 4 stages over 24 hours (~4.2 pts/hour)
+        hunger = max(5.0, hunger - elapsed_hours * 4.3)
+        clean = max(5.0, clean - elapsed_hours * 4.0)
+        if is_sleeping:
+            energy = min(100.0, energy + elapsed_hours * 28.0)
+            if energy >= 99.0:
+                is_sleeping = 0
+        else:
+            energy = max(5.0, energy - elapsed_hours * 4.2)
+        with db_lock:
+            conn = get_db()
+            if d.get("partner_username"):
+                conn.execute("""
+                    UPDATE users
+                    SET care_hunger = ?, care_clean = ?, care_energy = ?, is_sleeping = ?, last_care_update = ?
+                    WHERE username IN (?, ?)
+                """, (hunger, clean, energy, is_sleeping, now, d["username"], d["partner_username"]))
+            else:
+                conn.execute("""
+                    UPDATE users
+                    SET care_hunger = ?, care_clean = ?, care_energy = ?, is_sleeping = ?, last_care_update = ?
+                    WHERE username = ?
+                """, (hunger, clean, energy, is_sleeping, now, d["username"]))
+            conn.commit()
+            conn.close()
+
+    av = json.loads(d["avatar_json"] or "{}")
+    if "species" not in av:
+        av["species"] = "kitty_bear" if av.get("gender") == "girl" else "puppy"
+    if "name" not in av:
+        av["name"] = d.get("display_name") or "Зефирка"
+    if "gender" not in av:
+        av["gender"] = "girl"
+
+    seconds_left = max(0, int(STREAK_TIMEOUT_SECONDS - (now - last_cared_at)))
+    hours_left = seconds_left // 3600
+    mins_left = (seconds_left % 3600) // 60
+
+    hunger_info = value_to_stage(hunger, "hunger")
+    clean_info = value_to_stage(clean, "clean")
+    energy_info = value_to_stage(energy, "energy")
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    flame_info = get_flame_stage_info(days_together, bool(partner_left))
+    daily_reward_given = bool(d.get("last_heart_reward_day") == today_str)
+
+    can_claim_daily = (not daily_reward_given) and (not bool(partner_left))
+
+    return {
+        "username": d["username"],
+        "tgId": d["tg_id"],
+        "displayName": d["display_name"] or d["username"],
+        "bgColor": d["bg_color"] or "pink",
+        "mood": d["mood"] or "happy",
+        "moodLabel": d.get("mood_label") or "",
+        "moodReason": d.get("mood_reason") or "",
+        "moodTag": d.get("mood_tag") or "",
+        "moodUpdatedAt": float(d.get("mood_updated_at") or 0.0),
+        "moodReaction": d.get("mood_reaction") or "",
+        "moodReactionFrom": d.get("mood_reaction_from") or "",
+        "moodReactionAt": float(d.get("mood_reaction_at") or 0.0),
+        "anniversaryDate": str(d.get("anniversary_date") or ""),
+        "anniversaryStats": anniversary_stats,
+        "avatarConfigured": bool(d["avatar_configured"]),
+        "avatar": av,
+        "pet": av,
+        "care": {
+            "hungerStage": hunger_info["stage"],
+            "hungerLabel": hunger_info["label"],
+            "hungerValue": hunger_info["value"],
+            "hungerPercent": hunger_info["percent"],
+            "cleanStage": clean_info["stage"],
+            "cleanLabel": clean_info["label"],
+            "cleanValue": clean_info["value"],
+            "cleanPercent": clean_info["percent"],
+            "energyStage": energy_info["stage"],
+            "energyLabel": energy_info["label"],
+            "energyValue": energy_info["value"],
+            "energyPercent": energy_info["percent"],
+            "isSleeping": bool(is_sleeping),
+            "isSparkling": bool(clean_info["stage"] >= 4 or clean >= 90.0),
+            "partnerLeft": bool(partner_left),
+            "streakDays": days_together,
+            "daysTogether": days_together,
+            "pairedDateStr": paired_date_str,
+            "anniversaryStats": anniversary_stats,
+            "hoursLeft": hours_left,
+            "minsLeft": mins_left,
+            "flameStage": flame_info,
+            "dailyRewardGivenToday": daily_reward_given,
+            "canClaimDaily": can_claim_daily,
+            "dailyRewardAmount": DAILY_HEARTS_REWARD,
+        },
+        "partnerAccessories": [],
+        "unlockedAccessories": [],
+        "hearts": int(d["hearts"] or 0),
+        "partnerUsername": d["partner_username"],
+        "couplePose": d["couple_pose"] or "hug",
+        "freeRestoreUsed": bool(d.get("free_restore_used", 0)),
+        "freeRestoreAvailable": not bool(d.get("free_restore_used", 0)),
+    }
+
+
+def check_and_award_daily_hearts(u1_name: str, u2_name: str) -> bool:
+    """Awards +5 hearts to both partners on each new calendar day if flame is actively kept."""
+    if not u1_name or not u2_name:
+        return False
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    updates_1 = False
+    updates_2 = False
+    with db_lock:
+        conn = get_db()
+        r1 = conn.execute("SELECT * FROM users WHERE username = ?", (u1_name,)).fetchone()
+        r2 = conn.execute("SELECT * FROM users WHERE username = ?", (u2_name,)).fetchone()
+        if not r1 or not r2:
+            conn.close()
+            return False
+
+        # If either partner neglected the other (> 24h), flame is broken; NO daily hearts!
+        if r1["partner_left"] or r2["partner_left"]:
+            conn.close()
+            return False
+
+        r1_reward_day = r1["last_heart_reward_day"] or ""
+        r2_reward_day = r2["last_heart_reward_day"] or ""
+
+        if r1_reward_day == today_str and r2_reward_day == today_str:
+            conn.close()
+            return False
+
+        updates_1 = r1_reward_day != today_str
+        updates_2 = r2_reward_day != today_str
+
+        if updates_1:
+            conn.execute(
+                "UPDATE users SET hearts = hearts + ?, last_heart_reward_day = ? WHERE username = ?",
+                (DAILY_HEARTS_REWARD, today_str, u1_name)
+            )
+        if updates_2:
+            conn.execute(
+                "UPDATE users SET hearts = hearts + ?, last_heart_reward_day = ? WHERE username = ?",
+                (DAILY_HEARTS_REWARD, today_str, u2_name)
+            )
+
+        conn.commit()
+        conn.close()
+
+    now = time.time()
+    paired_at = r1["paired_at"] or r1["created_at"] or now
+    days_together = max(1, int(max(0.0, now - paired_at) // 86400) + 1)
+
+    log_text = f"🎁 Новый день вместе ({days_together} дн.)! Начислено по +{DAILY_HEARTS_REWARD} 💕 обоим партнёрам за горящий огонёк!"
+    add_log(u1_name, u2_name, "system", log_text)
+
+    tg_notice = (
+        f"🎁 <b>Новый день вместе!</b>\n\n"
+        f"Ваш огонёк любви горит уже <b>{days_together} дн.</b> 🔥\n"
+        f"Вы оба получили ежедневную награду: <b>+{DAILY_HEARTS_REWARD} 💕</b> в ChibiLove!"
+    )
+    if updates_1:
+        notify_user_tg(u1_name, tg_notice)
+    if updates_2:
+        notify_user_tg(u2_name, tg_notice)
+
+    return True
+
+
+def get_full_state(username: str) -> dict:
+    user = ensure_user(username)
+    uname = user["username"]
+    partner = None
+    logs = []
+    if user["partnerUsername"]:
+        partner = ensure_user(user["partnerUsername"])
+        if partner and partner.get("care"):
+            can_free = bool(user.get("freeRestoreAvailable") and (partner["care"].get("partnerLeft") or user.get("care", {}).get("partnerLeft")))
+            partner["care"]["canUserFreeRestore"] = can_free
+            partner["care"]["restoreCostHearts"] = RESTORE_PARTNER_COST_HEARTS
+        ckey = couple_key_for(uname, user["partnerUsername"])
+        with db_lock:
+            conn = get_db()
+            rows = conn.execute(
+                "SELECT actor_username, text, created_at FROM care_logs WHERE couple_key = ? ORDER BY id DESC LIMIT 12",
+                (ckey,)
+            ).fetchall()
+            conn.close()
+        logs = [{"actor": r["actor_username"], "text": r["text"], "time": r["created_at"]} for r in rows]
+
+    with db_lock:
+        conn = get_db()
+        incoming = conn.execute(
+            "SELECT id, from_username, from_name, created_at FROM pair_requests WHERE to_username = ? AND status = 'pending' ORDER BY id DESC",
+            (uname,)
+        ).fetchall()
+        outgoing = conn.execute(
+            "SELECT id, to_username, created_at FROM pair_requests WHERE from_username = ? AND status = 'pending' ORDER BY id DESC",
+            (uname,)
+        ).fetchall()
+        conn.close()
+
+    return {
+        "ok": True,
+        "user": user,
+        "partner": partner,
+        "incomingRequests": [
+            {"id": r["id"], "fromUsername": r["from_username"], "fromName": r["from_name"], "createdAt": r["created_at"]}
+            for r in incoming
+        ],
+        "outgoingRequests": [
+            {"id": r["id"], "toUsername": r["to_username"], "createdAt": r["created_at"]}
+            for r in outgoing
+        ],
+        "logs": logs,
+        "botUsername": BOT_USERNAME,
+        "restoreCostHearts": RESTORE_PARTNER_COST_HEARTS,
+        "starsPackages": list(STARS_PACKAGES.values()),
+    }
+
+
+def add_log(u1: str, u2: str, actor: str, text: str):
+    if not u1 or not u2:
+        return
+    safe_text = str(text or "")[:180]
+    ckey = couple_key_for(u1, u2)
+    with db_lock:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO care_logs (couple_key, actor_username, text, created_at) VALUES (?, ?, ?, ?)",
+            (ckey, actor, safe_text, time.time())
+        )
+        conn.commit()
+        conn.close()
+
+
+def claim_daily_reward(username: str) -> tuple[bool, dict, int]:
+    uname = normalize_username(username)
+    if not uname:
+        return False, {"ok": False, "error": "Username required"}, 400
+
+    user = ensure_user(uname)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # 1. Streak protection check: If user has partner, check if streak is broken
+    partner_uname = user.get("partnerUsername")
+    partner = None
+    if partner_uname:
+        partner = ensure_user(partner_uname)
+        p_care = partner.get("care", {})
+        u_care = user.get("care", {})
+        streak_broken = bool(p_care.get("partnerLeft") or u_care.get("partnerLeft"))
+        if streak_broken:
+            return False, {
+                "ok": False,
+                "streakBroken": True,
+                "needRestore": True,
+                "error": f"Огонёк любви погас из-за отсутствия заботы более 24 часов! 💔 Восстановите пару за {RESTORE_PARTNER_COST_HEARTS} 💕, чтобы возобновить получение ежедневных наград.",
+                "restoreCostHearts": RESTORE_PARTNER_COST_HEARTS,
+                "hearts": user.get("hearts", 0),
+            }, 400
+
+    # 2. Check if already claimed today
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT hearts, last_heart_reward_day FROM users WHERE username = ?", (uname,)).fetchone()
+        if not row:
+            conn.close()
+            return False, {"ok": False, "error": "User not found"}, 404
+
+        last_day = row["last_heart_reward_day"] or ""
+        if last_day == today_str:
+            conn.close()
+            return False, {
+                "ok": False,
+                "alreadyClaimed": True,
+                "error": f"Вы уже забрали ежедневную награду (+{DAILY_HEARTS_REWARD} 💕) сегодня! Возвращайтесь завтра 🎁",
+                "reward": 0,
+                "hearts": int(row["hearts"] or 0),
+            }, 400
+
+        # 3. Award +10 hearts reliably
+        new_hearts = int(row["hearts"] or 0) + DAILY_HEARTS_REWARD
+        conn.execute(
+            "UPDATE users SET hearts = ?, last_heart_reward_day = ? WHERE username = ?",
+            (new_hearts, today_str, uname)
+        )
+        conn.commit()
+        conn.close()
+
+    # 4. Care log & notification
+    if partner_uname:
+        days = partner.get("care", {}).get("daysTogether") or partner.get("care", {}).get("streakDays") or 1
+        add_log(uname, partner_uname, uname, f"🎁 @{uname} забрал(а) ежедневную награду +{DAILY_HEARTS_REWARD} 💕!")
+        notify_user_tg(
+            partner_uname,
+            f"🎁 <b>@{uname}</b> забрал(а) ежедневную награду: <b>+{DAILY_HEARTS_REWARD} 💕</b> в ChibiLove! Огонёк пары сияет 🔥"
+        )
+
+    updated_state = get_full_state(uname)
+    return True, {
+        "ok": True,
+        "claimed": True,
+        "reward": DAILY_HEARTS_REWARD,
+        "hearts": new_hearts,
+        "lastHeartRewardDay": today_str,
+        "user": updated_state.get("user"),
+        "partner": updated_state.get("partner"),
+        "message": f"Ежедневная награда +{DAILY_HEARTS_REWARD} 💕 успешно получена!",
+    }, 200
+
+
+def restore_streak_for_user(username: str, use_free: bool = False) -> tuple[bool, dict, int]:
+    uname = normalize_username(username)
+    if not uname:
+        return False, {"ok": False, "error": "Username required"}, 400
+
+    user = ensure_user(uname)
+    partner_uname = user.get("partnerUsername")
+    if not partner_uname:
+        return False, {"ok": False, "error": "Нет связанного партнёра"}, 400
+
+    with db_lock:
+        conn = get_db()
+        raw_u = conn.execute("SELECT * FROM users WHERE username = ?", (uname,)).fetchone()
+        raw_p = conn.execute("SELECT * FROM users WHERE username = ?", (partner_uname,)).fetchone()
+        conn.close()
+
+    if not raw_p or not raw_u:
+        return False, {"ok": False, "error": "Партнёр не найден"}, 400
+
+    now = time.time()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    p_last = raw_p["last_cared_at"] or now
+    u_last = raw_u["last_cared_at"] or now
+    p_left = bool(raw_p["partner_left"] or (now - p_last) >= STREAK_TIMEOUT_SECONDS)
+    u_left = bool(raw_u["partner_left"] or (now - u_last) >= STREAK_TIMEOUT_SECONDS)
+
+    if not p_left and not u_left:
+        return False, {"ok": False, "error": "Огонёк любви уже горит, восстанавливать не нужно!"}, 400
+
+    u_free_used = int(raw_u["free_restore_used"] or 0)
+    can_use_free = (u_free_used == 0)
+
+    is_free = False
+    if use_free and can_use_free:
+        is_free = True
+    elif can_use_free and (int(raw_u["hearts"] or 0) < RESTORE_PARTNER_COST_HEARTS):
+        is_free = True
+    elif use_free and not can_use_free:
+        return False, {"ok": False, "error": "Ты уже использовал(а) своё первое бесплатное восстановление!"}, 400
+
+    with db_lock:
+        conn = get_db()
+        if is_free:
+            conn.execute("UPDATE users SET free_restore_used = 1 WHERE username = ?", (uname,))
+            restore_msg = f"🎁 @{uname} восстановил(а) пару бесплатно (стартовый бонус)! Огонёк снова горит 🔥"
+            tg_msg = f"🎁 <b>@{uname}</b> восстановил(а) питомца и огонёк вашей пары! Огонёк снова горит 🔥"
+            new_hearts = int(raw_u["hearts"] or 0)
+        else:
+            # ATOMIC heart debit to prevent TOCTOU concurrency race conditions
+            cur = conn.execute(
+                "UPDATE users SET hearts = hearts - ? WHERE username = ? AND hearts >= ?",
+                (RESTORE_PARTNER_COST_HEARTS, uname, RESTORE_PARTNER_COST_HEARTS)
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                conn.close()
+                return False, {
+                    "ok": False,
+                    "needHearts": True,
+                    "error": f"Для восстановления пары нужно {RESTORE_PARTNER_COST_HEARTS} 💕 (20 ⭐). Пополни сердечки за Звёзды Telegram!",
+                    "restoreCostHearts": RESTORE_PARTNER_COST_HEARTS,
+                    "currentHearts": int(raw_u["hearts"] or 0),
+                }, 400
+
+            new_hearts = int(raw_u["hearts"] or 0) - RESTORE_PARTNER_COST_HEARTS
+            restore_msg = f"🔥 @{uname} вернул(а) пару за {RESTORE_PARTNER_COST_HEARTS} 💕 и спас(ла) огонёк любви!"
+            tg_msg = f"🔥 <b>@{uname}</b> восстановил(а) вашу пару за {RESTORE_PARTNER_COST_HEARTS} 💕 и спас(ла) огонёк в ChibiLove! 💞"
+
+        # Restore BOTH partners in the database simultaneously
+        conn.execute("""
+            UPDATE users
+            SET partner_left = 0, care_hunger = 85.0, care_clean = 85.0, care_energy = 85.0,
+                last_cared_at = ?, last_care_update = ?, last_streak_day = ?
+            WHERE username IN (?, ?)
+        """, (now, now, today_str, uname, partner_uname))
+        conn.commit()
+        conn.close()
+
+    add_log(uname, partner_uname, uname, restore_msg)
+    notify_user_tg(partner_uname, tg_msg)
+    full_state = get_full_state(uname)
+    return True, {
+        "ok": True,
+        "restored": True,
+        "costHearts": 0 if is_free else RESTORE_PARTNER_COST_HEARTS,
+        "usedFree": is_free,
+        "hearts": new_hearts,
+        "user": full_state.get("user"),
+        "partner": full_state.get("partner"),
+        "care": full_state.get("user", {}).get("care"),
+        "message": restore_msg,
+    }, 200
+
+
+def get_couple_info(username: str) -> tuple[bool, dict, int]:
+    uname = normalize_username(username)
+    if not uname:
+        return False, {"ok": False, "error": "Username required"}, 400
+
+    state = get_full_state(uname)
+    user = state.get("user", {})
+    partner = state.get("partner")
+
+    if not partner:
+        return True, {
+            "ok": True,
+            "paired": False,
+            "user": user,
+            "partner": None,
+            "restoreCostHearts": RESTORE_PARTNER_COST_HEARTS,
+            "dailyRewardAmount": DAILY_HEARTS_REWARD,
+            "message": "Партнёр не привязан",
+        }, 200
+
+    p_care = partner.get("care", {})
+    u_care = user.get("care", {})
+    days = p_care.get("daysTogether") or p_care.get("streakDays") or 1
+    streak_broken = bool(p_care.get("partnerLeft") or u_care.get("partnerLeft"))
+
+    return True, {
+        "ok": True,
+        "paired": True,
+        "coupleKey": couple_key_for(uname, partner["username"]),
+        "daysTogether": days,
+        "streakDays": p_care.get("streakDays", 1),
+        "streakBroken": streak_broken,
+        "hoursLeft": p_care.get("hoursLeft", 24),
+        "minsLeft": p_care.get("minsLeft", 0),
+        "pairedDateStr": p_care.get("pairedDateStr", ""),
+        "anniversaryStats": user.get("anniversaryStats") or p_care.get("anniversaryStats"),
+        "flameStage": state.get("flameStage"),
+        "restoreCostHearts": RESTORE_PARTNER_COST_HEARTS,
+        "dailyRewardAmount": DAILY_HEARTS_REWARD,
+        "dailyRewardGivenToday": u_care.get("dailyRewardGivenToday", False),
+        "canClaimDaily": u_care.get("canClaimDaily", False),
+        "user": user,
+        "partner": partner,
+        "couplePose": user.get("couplePose", "hug"),
+        "careLogs": state.get("careLogs", []),
+    }, 200
+
+
+class AppHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=PUBLIC_DIR, **kwargs)
+
+    def log_message(self, format, *args):
+        pass
+
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Telegram-Init-Data")
+        if self.path.startswith("/api/") or self.path == "/" or self.path.endswith(".html") or self.path.endswith(".js") or self.path.endswith(".css") or "?" in self.path:
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        else:
+            self.send_header("Cache-Control", "public, max-age=3600")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def send_json(self, data: dict, status: int = 200):
+        raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_HEAD(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/api/health", "/api/state"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            return
+        return super().do_HEAD()
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/state":
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            display_name = qs.get("name", [None])[0]
+            tg_id_str = qs.get("tg_id", [None])[0]
+            tg_id = int(tg_id_str) if (tg_id_str and tg_id_str.isdigit()) else None
+            ensure_user(username, display_name=display_name, tg_id=tg_id)
+            self.send_json(get_full_state(username))
+            return
+        if parsed.path == "/api/health":
+            self.send_json({"ok": True, "bot": BOT_USERNAME, "webappUrl": get_current_webapp_url()})
+            return
+        if parsed.path == "/api/sync":
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            since_id_str = qs.get("last_event_id", qs.get("since", ["0"]))[0]
+            since_id = int(since_id_str) if (since_id_str and since_id_str.isdigit()) else 0
+            wait_str = qs.get("wait", ["0"])[0]
+            try:
+                wait_sec = float(wait_str)
+            except Exception:
+                wait_sec = 0.0
+            wait_sec = max(0.0, min(wait_sec, 5.0))
+
+            ensure_user(username)
+            max_id, events = sync_manager.get_events_since(username, since_id, wait_seconds=wait_sec)
+            full_state = get_full_state(username)
+            self.send_json({
+                "ok": True,
+                "serverTime": time.time(),
+                "lastEventId": max_id,
+                "events": events,
+                "state": full_state,
+            })
+            return
+        if parsed.path == "/api/care/status":
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            full_state = get_full_state(username)
+            u = full_state.get("user") or {}
+            p = full_state.get("partner") or {}
+            care_obj = (p.get("care") if p else u.get("care")) or {}
+            self.send_json({
+                "ok": True,
+                "username": username,
+                "user": u,
+                "partner": p,
+                "care": care_obj,
+                "partnerMood": p.get("mood") or "",
+                "partnerMoodReason": p.get("moodReason") or "",
+                "streakDays": care_obj.get("daysTogether") or care_obj.get("streakDays") or 1,
+                "hoursLeft": care_obj.get("hoursLeft", 24),
+                "minsLeft": care_obj.get("minsLeft", 0),
+            })
+            return
+        if parsed.path == "/api/couple":
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            ok, data, code = get_couple_info(username)
+            self.send_json(data, code)
+            return
+        if parsed.path == "/api/claim-daily":
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            ok, data, code = claim_daily_reward(username)
+            self.send_json(data, code)
+            return
+        if parsed.path in ("/api/restore-streak", "/api/care/restore"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            username = qs.get("username", ["ksjjfnnn"])[0]
+            use_free = qs.get("useFree", ["0"])[0] in ("1", "true", "True")
+            ok, data, code = restore_streak_for_user(username, use_free=use_free)
+            self.send_json(data, code)
+            return
+        return super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = {}
+        if length > 0:
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                body = {}
+
+        if parsed.path == "/api/save_ref":
+            idx = body.get("index", 0)
+            data_b64 = body.get("data", "")
+            if "," in data_b64:
+                data_b64 = data_b64.split(",", 1)[1]
+            import base64
+            raw = base64.b64decode(data_b64)
+            save_path = os.path.join(PUBLIC_DIR, "img", f"ref_anime_{idx}.jpg")
+            with open(save_path, "wb") as f:
+                f.write(raw)
+            self.send_json({"ok": True, "saved": save_path, "bytes": len(raw)})
+            return
+
+        username = normalize_username(body.get("username", "ksjjfnnn"))
+        user = ensure_user(username, display_name=body.get("displayName"), tg_id=body.get("tgId"))
+
+        # R4 Clean Couples Economy Endpoints:
+        if parsed.path == "/api/couple":
+            if body.get("anniversaryDate") or body.get("pairedAt"):
+                new_date = body.get("anniversaryDate") or body.get("pairedAt")
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("UPDATE users SET anniversary_date = ? WHERE username = ?", (str(new_date), username))
+                    if user.get("partnerUsername"):
+                        conn.execute("UPDATE users SET anniversary_date = ? WHERE username = ?", (str(new_date), user["partnerUsername"]))
+                    conn.commit()
+                    conn.close()
+            ok, data, code = get_couple_info(username)
+            self.send_json(data, code)
+            return
+
+        if parsed.path == "/api/claim-daily":
+            ok, data, code = claim_daily_reward(username)
+            self.send_json(data, code)
+            return
+
+        # 1. SAVE OWN PET AVATAR
+        if parsed.path in ("/api/avatar", "/api/pet"):
+            avatar_data = body.get("avatar") or body.get("pet") or {}
+            if not avatar_data.get("species"):
+                avatar_data["species"] = "kitty_bear"
+            pet_name = avatar_data.get("name") or user.get("displayName") or "Зефирка"
+            avatar_data["name"] = pet_name
+            with db_lock:
+                conn = get_db()
+                conn.execute(
+                    "UPDATE users SET avatar_json = ?, avatar_configured = 1 WHERE username = ?",
+                    (json.dumps(avatar_data, ensure_ascii=False), username)
+                )
+                conn.commit()
+                conn.close()
+            if user["partnerUsername"]:
+                add_log(username, user["partnerUsername"], username, f"🐾 @{username} выбрал(а) питомца: {pet_name}!")
+                notify_user_tg(
+                    user["partnerUsername"],
+                    f"🐾 <b>@{username}</b> выбрал(а) питомца: <b>{pet_name}</b>! Зайди в ChibiLove посмотреть 💞"
+                )
+            self.send_json(get_full_state(username))
+            return
+
+        # 2. BACKGROUND THEME SETTINGS
+        if parsed.path == "/api/settings":
+            bg_color = body.get("bgColor")
+            if bg_color in PASTEL_THEMES:
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("UPDATE users SET bg_color = ? WHERE username = ?", (bg_color, username))
+                    conn.commit()
+                    conn.close()
+            self.send_json(get_full_state(username))
+            return
+
+        # 3. PAIR REQUESTS
+        if parsed.path == "/api/pair/request":
+            target = normalize_username(body.get("partnerUsername", ""))
+            if not target:
+                self.send_json({"ok": False, "error": "Введи юзернейм партнёра (например, @username)"}, 400)
+                return
+            if target == username:
+                self.send_json({"ok": False, "error": "Нельзя отправить запрос самому себе 😊"}, 400)
+                return
+
+            ensure_user(target)
+            now = time.time()
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            auto_accepted = False
+            with db_lock:
+                conn = get_db()
+                reverse_req = conn.execute(
+                    "SELECT id FROM pair_requests WHERE from_username = ? AND to_username = ? AND status = 'pending'",
+                    (target, username)
+                ).fetchone()
+                if reverse_req:
+                    pose = random.choice(POSES)
+                    conn.execute("UPDATE pair_requests SET status = 'accepted' WHERE id = ?", (reverse_req["id"],))
+                    conn.execute(
+                        "UPDATE users SET partner_username = ?, couple_pose = ?, streak_days = 1, paired_at = ?, last_cared_at = ?, last_streak_day = ?, partner_left = 0 WHERE username IN (?, ?)",
+                        (target, pose, now, now, today_str, username, target)
+                    )
+                    conn.execute("UPDATE users SET partner_username = ? WHERE username = ?", (username, target))
+                    conn.commit()
+                    auto_accepted = True
+                else:
+                    conn.execute(
+                        "DELETE FROM pair_requests WHERE from_username = ? AND to_username = ? AND status = 'pending'",
+                        (username, target)
+                    )
+                    conn.execute(
+                        "INSERT INTO pair_requests (from_username, from_name, to_username, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                        (username, user["displayName"], target, now)
+                    )
+                    conn.commit()
+                conn.close()
+
+            if auto_accepted:
+                add_log(username, target, username, f"💞 Пара @{username} и @{target} создана!")
+                self.send_json(get_full_state(username))
+                return
+
+            webapp_url = get_current_webapp_url()
+            markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Принять пару 💕", "callback_data": f"accept_pair:{username}"},
+                        {"text": "❌ Отклонить", "callback_data": f"decline_pair:{username}"}
+                    ],
+                    [
+                        {"text": "💞 Открыть ChibiLove", "web_app": {"url": f"{webapp_url}/?tg_user={target}"}}
+                    ]
+                ]
+            }
+            notify_user_tg(
+                target,
+                f"💌 <b>@{username}</b> приглашает тебя создать пару в <b>ChibiLove</b>!\n\n"
+                f"Нажми <b>«Принять пару 💕»</b> ниже или открой приложение:",
+                reply_markup=markup
+            )
+            self.send_json(get_full_state(username))
+            return
+
+        if parsed.path == "/api/pair/respond":
+            req_id = body.get("requestId")
+            from_uname = normalize_username(body.get("fromUsername", ""))
+            action = body.get("action", "accept")
+            now = time.time()
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            accepted_pair = None
+            with db_lock:
+                conn = get_db()
+                if req_id:
+                    req_row = conn.execute("SELECT * FROM pair_requests WHERE id = ?", (req_id,)).fetchone()
+                else:
+                    req_row = conn.execute(
+                        "SELECT * FROM pair_requests WHERE from_username = ? AND to_username = ? AND status = 'pending'",
+                        (from_uname, username)
+                    ).fetchone()
+                if req_row:
+                    sender = req_row["from_username"]
+                    receiver = req_row["to_username"]
+                    if action == "accept":
+                        pose = random.choice(POSES)
+                        conn.execute("UPDATE pair_requests SET status = 'accepted' WHERE id = ?", (req_row["id"],))
+                        conn.execute(
+                            "UPDATE users SET partner_username = ?, couple_pose = ?, streak_days = 1, paired_at = ?, last_cared_at = ?, last_streak_day = ?, partner_left = 0 WHERE username = ?",
+                            (receiver, pose, now, now, today_str, sender)
+                        )
+                        conn.execute(
+                            "UPDATE users SET partner_username = ?, couple_pose = ?, streak_days = 1, paired_at = ?, last_cared_at = ?, last_streak_day = ?, partner_left = 0 WHERE username = ?",
+                            (sender, pose, now, now, today_str, receiver)
+                        )
+                        conn.commit()
+                        accepted_pair = (sender, receiver)
+                    else:
+                        conn.execute("UPDATE pair_requests SET status = 'declined' WHERE id = ?", (req_row["id"],))
+                        conn.commit()
+                conn.close()
+
+            if accepted_pair:
+                sender, receiver = accepted_pair
+                add_log(sender, receiver, receiver, f"💞 Пара @{sender} и @{receiver} создана! Огонёк зажжён 🔥")
+                notify_user_tg(
+                    sender,
+                    f"🎉 <b>@{receiver}</b> принял(а) твой запрос! Теперь вы пара в <b>ChibiLove</b> 💞\n"
+                    f"Не забывайте заботиться друг о друге каждые 24 часа, чтобы не погас огонёк 🔥!"
+                )
+                sync_manager.publish(
+                    actor=receiver,
+                    target=sender,
+                    event_type="pair_linked",
+                    data={"partner": receiver, "message": f"💞 Пара @{sender} и @{receiver} создана! Огонёк зажжён 🔥"}
+                )
+            self.send_json(get_full_state(username))
+            return
+
+        if parsed.path == "/api/pair/unlink":
+            partner_uname = user.get("partnerUsername")
+            with db_lock:
+                conn = get_db()
+                conn.execute("UPDATE users SET partner_username = NULL, paired_at = NULL, partner_left = 0 WHERE username = ?", (username,))
+                if partner_uname:
+                    conn.execute("UPDATE users SET partner_username = NULL, paired_at = NULL, partner_left = 0 WHERE username = ?", (partner_uname,))
+                conn.execute("DELETE FROM pair_requests WHERE from_username = ? OR to_username = ?", (username, username))
+                conn.commit()
+                conn.close()
+            if partner_uname:
+                notify_user_tg(partner_uname, f"💔 <b>@{username}</b> отвязал(а) пару в ChibiLove.")
+                sync_manager.publish(
+                    actor=username,
+                    target=partner_uname,
+                    event_type="pair_unlinked",
+                    data={"message": f"💔 Пара отвязана пользователем @{username}"}
+                )
+            self.send_json(get_full_state(username))
+            return
+
+        # 4. CARE ACTIONS: FEED, SHOWER, SLEEP, PET
+        if parsed.path == "/api/care/action":
+            partner_uname = user.get("partnerUsername")
+            target_uname = partner_uname if partner_uname else username
+
+            with db_lock:
+                conn = get_db()
+                t_row = conn.execute("SELECT * FROM users WHERE username = ?", (target_uname,)).fetchone()
+                conn.close()
+
+            target_user = apply_decay_and_serialize(t_row)
+            if partner_uname and target_user["care"]["partnerLeft"]:
+                self.send_json({
+                    "ok": False,
+                    "error": f"Партнёр ушёл, так как о нём не заботились 24 часа 💔 Восстанови его за {RESTORE_PARTNER_COST_HEARTS} 💕!"
+                }, 400)
+                return
+
+            action = body.get("action")  # 'feed', 'shower', 'sleep', 'pet'
+            food_name = body.get("itemName", "Клубничный тортик 🍰")
+
+            with db_lock:
+                conn = get_db()
+                raw_t = conn.execute("SELECT * FROM users WHERE username = ?", (target_uname,)).fetchone()
+                hunger = float(raw_t["care_hunger"] or 80.0)
+                clean = float(raw_t["care_clean"] or 80.0)
+                energy = float(raw_t["care_energy"] or 80.0)
+                is_sleeping = bool(raw_t["is_sleeping"])
+                streak_days = int(raw_t["streak_days"] or 1)
+                last_streak_day = raw_t["last_streak_day"] or ""
+
+                log_msg = None
+                tg_msg = None
+
+                if action == "feed":
+                    was_full = hunger >= 100.0
+                    is_sleeping = False
+                    hunger = min(100.0, hunger + 35.0)
+                    stage_lbl = value_to_stage(hunger, "hunger")["label"]
+                    log_msg = f"🍰 @{username} покормил(а) питомца: {food_name}"
+                    tg_msg = f"🍰 <b>@{username}</b> вкусно покормил(а) питомца ({food_name})! Стадия: <b>{stage_lbl}</b>"
+                elif action == "shower":
+                    is_sleeping = False
+                    clean = min(100.0, clean + 40.0)
+                    stage_lbl = value_to_stage(clean, "clean")["label"]
+                    log_msg = f"🛁 @{username} искупал(а) питомца в ванночке с пузырями"
+                    tg_msg = f"🛁 <b>@{username}</b> искупал(а) питомца! Шёрстка чистая и блестит! ✨"
+                elif action == "sleep":
+                    is_sleeping = not is_sleeping
+                    if is_sleeping:
+                        energy = min(100.0, energy + 35.0)
+                        log_msg = f"🌙 @{username} уложил(а) питомца спать"
+                        tg_msg = f"🌙 <b>@{username}</b> нежно уложил(а) питомца под одеялко спать 💤"
+                    else:
+                        log_msg = f"☀️ @{username} разбудил(а) питомца"
+                        tg_msg = f"☀️ <b>@{username}</b> разбудил(а) питомца! Пора радоваться новому дню 🌸"
+                elif action == "pet":
+                    energy = min(100.0, energy + 5.0)
+                    log_msg = f"💖 @{username} нежно погладил(а) питомца"
+                    tg_msg = f"💖 <b>@{username}</b> нежно гладит питомца! Муррр 💕"
+                else:
+                    conn.close()
+                    self.send_json({"ok": False, "error": "Неизвестное действие ухода"}, 400)
+                    return
+
+                now = time.time()
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if last_streak_day and last_streak_day != today_str:
+                    streak_days += 1
+
+                if partner_uname:
+                    conn.execute("""
+                        UPDATE users
+                        SET care_hunger = ?, care_clean = ?, care_energy = ?, is_sleeping = ?,
+                            last_care_update = ?, last_cared_at = ?, streak_days = ?, last_streak_day = ?, partner_left = 0
+                        WHERE username IN (?, ?)
+                    """, (hunger, clean, energy, 1 if is_sleeping else 0, now, now, streak_days, today_str, username, partner_uname))
+                else:
+                    conn.execute("""
+                        UPDATE users
+                        SET care_hunger = ?, care_clean = ?, care_energy = ?, is_sleeping = ?,
+                            last_care_update = ?, last_cared_at = ?, streak_days = ?, last_streak_day = ?
+                        WHERE username = ?
+                    """, (hunger, clean, energy, 1 if is_sleeping else 0, now, now, streak_days, today_str, target_uname))
+                conn.commit()
+                conn.close()
+
+            if partner_uname and log_msg:
+                add_log(username, partner_uname, username, log_msg)
+            if partner_uname and tg_msg:
+                notify_user_tg(partner_uname, tg_msg)
+
+            sync_manager.publish(
+                actor=username,
+                target=partner_uname,
+                event_type="care_action",
+                data={
+                    "action": action,
+                    "itemName": food_name,
+                    "isSleeping": is_sleeping,
+                    "hunger": hunger,
+                    "clean": clean,
+                    "energy": energy,
+                    "message": log_msg,
+                }
+            )
+
+            self.send_json(get_full_state(username))
+            return
+
+        # 5. RESTORE STREAK / PARTNER IF LEFT AFTER 24H NEGLECT (Dedicated endpoint: /api/restore-streak)
+        if parsed.path in ("/api/restore-streak", "/api/care/restore"):
+            use_free = bool(body.get("useFree") or body.get("use_free"))
+            ok, data, code = restore_streak_for_user(username, use_free=use_free)
+            self.send_json(data, code)
+            return
+
+        # 6. ACCESSORIES TOGGLE (Accessories strictly removed in clean couples economy)
+        if parsed.path == "/api/accessories/toggle":
+            self.send_json({
+                "ok": True,
+                "message": "All clothing and accessories stores are removed in clean pet economy",
+                "accessories": []
+            })
+            return
+
+        # 7. SET OWN MOOD (with reason tag, label, custom note, and timestamp)
+        if parsed.path == "/api/mood":
+            mood = body.get("mood", "joyful")
+            mood_label = body.get("moodLabel", mood)
+            mood_tag = (body.get("moodTag") or "").strip()[:40]
+            mood_reason = (body.get("moodReason") or "").strip()[:140]
+            now_ts = time.time()
+            with db_lock:
+                conn = get_db()
+                conn.execute("""
+                    UPDATE users
+                    SET mood = ?, mood_label = ?, mood_tag = ?, mood_reason = ?, mood_updated_at = ?
+                    WHERE username = ?
+                """, (mood, mood_label, mood_tag, mood_reason, now_ts, username))
+                conn.commit()
+                conn.close()
+            if user["partnerUsername"]:
+                tag_label = f"[{mood_tag}]" if mood_tag else ""
+                log_text = f"💭 @{username} сменил(а) своё настроение на: {mood_label} {tag_label}".strip()
+                if mood_reason:
+                    log_text += f" («{mood_reason}»)"
+                add_log(username, user["partnerUsername"], username, log_text)
+                tg_msg = f"💭 У <b>@{username}</b> сейчас настроение: <b>{mood_label}</b>"
+                if mood_tag:
+                    tg_msg += f"\n<i>Причина: {mood_tag}</i>"
+                if mood_reason:
+                    tg_msg += f"\n<i>«{mood_reason}»</i>"
+                notify_user_tg(user["partnerUsername"], tg_msg)
+            sync_manager.publish(
+                actor=username,
+                target=user.get("partnerUsername"),
+                event_type="mood_change",
+                data={
+                    "mood": mood,
+                    "moodLabel": mood_label,
+                    "moodTag": mood_tag,
+                    "moodReason": mood_reason,
+                    "message": f"💭 Настроение половинки: {mood_label}",
+                }
+            )
+            self.send_json(get_full_state(username))
+            return
+
+        # 7b. REACT TO PARTNER'S MOOD (hug, kiss, tea, cheer)
+        if parsed.path == "/api/mood/react":
+            reaction = (body.get("reaction") or "hug").strip()
+            partner_uname = user.get("partnerUsername")
+            if not partner_uname:
+                self.send_json({"ok": False, "error": "Нет связанного партнёра"}, 400)
+                return
+            now_ts = time.time()
+            rx_labels = {
+                "hug": "🫂 Крепкие объятия",
+                "kiss": "💋 Нежный поцелуй",
+                "tea": "☕ Тёплый чай с печенькой",
+                "cheer": "💖 Лучи любви и поддержки"
+            }
+            rx_title = rx_labels.get(reaction, "💕 Любовная реакция")
+            with db_lock:
+                conn = get_db()
+                conn.execute("""
+                    UPDATE users
+                    SET mood_reaction = ?, mood_reaction_from = ?, mood_reaction_at = ?
+                    WHERE username = ?
+                """, (reaction, username, now_ts, partner_uname))
+                conn.commit()
+                conn.close()
+            add_log(username, partner_uname, username, f"{rx_title}: @{username} отправил(а) для @{partner_uname}!")
+            notify_user_tg(partner_uname, f"💖 <b>@{username}</b> отправил(а) тебе реакцию: <b>{rx_title}</b>!")
+            sync_manager.publish(
+                actor=username,
+                target=partner_uname,
+                event_type="mood_reaction",
+                data={
+                    "reaction": reaction,
+                    "reactionTitle": rx_title,
+                    "message": f"{rx_title} от @{username}!",
+                }
+            )
+            self.send_json(get_full_state(username))
+            return
+
+        # 7c. SET COUPLE ANNIVERSARY DATE
+        if parsed.path == "/api/couple/anniversary":
+            anniversary_date = (body.get("anniversaryDate") or "").strip()
+            partner_uname = user.get("partnerUsername")
+            if not anniversary_date:
+                self.send_json({"ok": False, "error": "Не указана дата годовщины"}, 400)
+                return
+            try:
+                if "T" in anniversary_date:
+                    parsed_dt = datetime.fromisoformat(anniversary_date.replace("Z", "+00:00"))
+                else:
+                    parts = anniversary_date.split("-")
+                    parsed_dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]), 0, 0, 0, tzinfo=timezone.utc)
+                parsed_ts = parsed_dt.timestamp()
+                clean_iso = parsed_dt.strftime("%Y-%m-%d")
+            except Exception:
+                self.send_json({"ok": False, "error": "Некорректный формат даты (ожидается ГГГГ-ММ-ДД)"}, 400)
+                return
+
+            with db_lock:
+                conn = get_db()
+                conn.execute("UPDATE users SET anniversary_date = ?, paired_at = ? WHERE username = ?",
+                             (clean_iso, parsed_ts, username))
+                if partner_uname:
+                    conn.execute("UPDATE users SET anniversary_date = ?, paired_at = ? WHERE username = ?",
+                                 (clean_iso, parsed_ts, partner_uname))
+                conn.commit()
+                conn.close()
+
+            date_str = parsed_dt.strftime("%d.%m.%Y")
+            if partner_uname:
+                add_log(username, partner_uname, username, f"📅 @{username} установил(а) дату годовщины пары: {date_str} 💕")
+                notify_user_tg(partner_uname, f"📅 <b>@{username}</b> установил(а) дату вашей годовщины: <b>{date_str}</b> 💕")
+
+            self.send_json(get_full_state(username))
+            return
+
+        # 8. COUPLE POSE IN "TOGETHER" WINDOW
+        if parsed.path == "/api/pose":
+            partner_uname = user.get("partnerUsername")
+            pose = body.get("pose")
+            if not pose or pose == "random":
+                others = [p for p in POSES if p != user.get("couplePose")]
+                pose = random.choice(others) if others else "hug"
+            with db_lock:
+                conn = get_db()
+                conn.execute("UPDATE users SET couple_pose = ? WHERE username = ?", (pose, username))
+                if partner_uname:
+                    conn.execute("UPDATE users SET couple_pose = ? WHERE username = ?", (pose, partner_uname))
+                conn.commit()
+                conn.close()
+            self.send_json(get_full_state(username))
+            return
+
+        # 9. CREATE REAL TELEGRAM STARS (XTR) INVOICE LINK
+        if parsed.path == "/api/stars/invoice":
+            pkg_key = body.get("packageKey")
+            pkg = STARS_PACKAGES.get(pkg_key) if pkg_key else None
+            if not pkg:
+                try:
+                    stars_count = int(body.get("stars", 100))
+                except (ValueError, TypeError):
+                    stars_count = 100
+                for p in STARS_PACKAGES.values():
+                    if p["stars"] == stars_count:
+                        pkg = p
+                        break
+            if not pkg:
+                pkg = STARS_PACKAGES["stars_100"]
+
+            payload_str = f"hearts:{username}:{pkg['hearts']}:{pkg['stars']}:{int(time.time())}"
+            res = tg_api_call("createInvoiceLink", {
+                "title": pkg["title"],
+                "description": pkg["desc"],
+                "payload": payload_str,
+                "provider_token": "",
+                "currency": "XTR",
+                "prices": [{"label": pkg["title"], "amount": pkg["stars"]}],
+            })
+            if res and res.get("ok") and res.get("result"):
+                self.send_json({"ok": True, "invoiceUrl": res["result"], "package": pkg})
+            else:
+                self.send_json({"ok": False, "error": "Не удалось создать счёт Telegram Stars. Попробуй открыть приложение внутри Telegram."}, 400)
+            return
+
+        # 10. AFFECTIONATE FINGER PETTING LOG (Throttled, zero free hearts)
+        if parsed.path == "/api/care/pet":
+            partner_uname = user.get("partnerUsername")
+            if partner_uname:
+                now = time.time()
+                ckey = couple_key_for(username, partner_uname)
+                should_log = True
+                with db_lock:
+                    conn = get_db()
+                    recent = conn.execute(
+                        "SELECT created_at FROM care_logs WHERE couple_key = ? AND actor_username = ? AND text LIKE '%погладил%' ORDER BY id DESC LIMIT 1",
+                        (ckey, username)
+                    ).fetchone()
+                    if recent and (now - float(recent["created_at"] or 0)) < 180:
+                        should_log = False
+                    conn.close()
+                if should_log:
+                    add_log(username, partner_uname, username, f"🤚 @{username} нежно погладил(а) питомца @{partner_uname} 💕")
+                    notify_user_tg(partner_uname, f"💖 <b>@{username}</b> нежно гладит вашего питомца! Муррр 💕")
+                sync_manager.publish(
+                    actor=username,
+                    target=partner_uname,
+                    event_type="care_action",
+                    data={
+                        "action": "pet",
+                        "message": f"💖 @{username} нежно гладит питомца! Муррр 💕",
+                    }
+                )
+            self.send_json({"ok": True})
+            return
+
+        # 11. IN-APP SUPPORT TICKET FORWARDING TO DEVELOPER (@Ksjjfnnn)
+        if parsed.path == "/api/support":
+            msg_text = (body.get("message") or "").strip()
+            if not msg_text:
+                self.send_json({"ok": False, "error": "Напиши текст сообщения"}, 400)
+                return
+            forward_support_ticket(
+                sender_tg_id=user.get("tgId") or 0,
+                sender_uname=username,
+                sender_name=user.get("displayName") or username,
+                text_content=msg_text,
+                source="Mini App"
+            )
+            self.send_json({"ok": True})
+            return
+
+        self.send_json({"ok": False, "error": "Unknown endpoint"}, 404)
+
+
+def html_esc(s: str) -> str:
+    return (
+        str(s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def get_admin_chat_id() -> int:
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT tg_id FROM users WHERE username = ?", (ADMIN_USERNAME,)).fetchone()
+        conn.close()
+    if row and row["tg_id"]:
+        return int(row["tg_id"])
+    return ADMIN_TG_ID
+
+
+def set_support_session(tg_id: int, mode: str = None, target_tg_id: int = None):
+    if not tg_id:
+        return
+    with db_lock:
+        conn = get_db()
+        if not mode:
+            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO support_sessions (tg_id, mode, target_tg_id, updated_at) VALUES (?, ?, ?, ?)",
+                (tg_id, mode, target_tg_id, time.time())
+            )
+        conn.commit()
+        conn.close()
+
+
+def get_support_session(tg_id: int):
+    if not tg_id:
+        return None
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("SELECT mode, target_tg_id, updated_at FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
+        conn.close()
+    return dict(row) if row else None
+
+
+def forward_support_ticket(sender_tg_id: int, sender_uname: str, sender_name: str, text_content: str, orig_chat_id: int = None, orig_msg_id: int = None, source: str = "Telegram Bot"):
+    now = time.time()
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO support_tickets (tg_id, username, display_name, message_text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (sender_tg_id, sender_uname, sender_name, text_content or "[Медиафайл]", now)
+        )
+        ticket_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+    admin_id = get_admin_chat_id()
+    dt_str = datetime.fromtimestamp(now).strftime("%d.%m.%Y %H:%M")
+    uname_tag = f"@{html_esc(sender_uname)}" if sender_uname and not sender_uname.startswith("user_") else html_esc(sender_uname)
+    header = (
+        f"📩 <b>Обращение в поддержку #{ticket_id}</b> ({html_esc(source)})\n"
+        f"👤 От: <b>{html_esc(sender_name)}</b> ({uname_tag} | ID: <code>{sender_tg_id}</code>)\n"
+        f"🕒 {dt_str}\n\n"
+        f"💬 <b>Сообщение:</b>\n{html_esc(text_content) if text_content else '<i>(вложение ниже)</i>'}"
+    )
+    reply_markup = None
+    if sender_tg_id:
+        reply_markup = {
+            "inline_keyboard": [
+                [{"text": f"↩️ Ответить {uname_tag}", "callback_data": f"reply_support:{sender_tg_id}"}]
+            ]
+        }
+    tg_api_call("sendMessage", {
+        "chat_id": admin_id,
+        "parse_mode": "HTML",
+        "text": header,
+        "reply_markup": reply_markup
+    })
+    if orig_chat_id and orig_msg_id and not text_content:
+        tg_api_call("copyMessage", {
+            "chat_id": admin_id,
+            "from_chat_id": orig_chat_id,
+            "message_id": orig_msg_id
+        })
+    elif orig_chat_id and orig_msg_id and orig_msg_id > 0:
+        # Also copy message if it contains photo/video/document alongside caption
+        pass
+
+
+def build_bot_info_text(first_name: str = None) -> str:
+    greet = f"Привет, <b>{html_esc(first_name)}</b>! 🌸\n\n" if first_name else ""
+    return (
+        f"{greet}"
+        f"💞 <b>ChibiLove</b> — уютное приложение для влюблённых пар в Telegram с милыми анимированными питомцами!\n\n"
+        f"• 🐾 <b>Милый питомец на выбор:</b> выбери своего любимца (Мишка-Котёнок, Щенок, Лисёнок, Пандочка, Пингвинчик, Зайчик, Хомячок, Цыплёнок, Коала) и дай ему имя!\n"
+        f"• 🎬 <b>Мультяшная анимация:</b> питомец дышит, моргает, кушает лакомства, купается в пене и уютно спит под одеялком.\n"
+        f"• 🤚 <b>Интерактивная ласка:</b> гладь питомца пальцем или мышкой — он сжимается от удовольствия и дарит фонтанчик сердечек!\n"
+        f"• 🔥 <b>Огонёк любви:</b> заботьтесь о питомце раз в 24 часа, растите огоньки и дни вместе.\n"
+        f"• 🎁 <b>Сердечки:</b> автоматически 200 💕 на старте (хватит на восстановление пары) + <b>5 💕 каждый день</b>!\n"
+        f"• ⚠️ <i>Если забыть позаботиться за 24 часа — огонёк гаснет. Восстановить пару можно за {RESTORE_PARTNER_COST_HEARTS} 💕 (первый раз бесплатно!).</i>\n\n"
+        f"👇 <b>Нажми кнопку ниже, чтобы войти в игру:</b>"
+    )
+
+
+def build_flame_info_text(uname: str) -> str:
+    user_obj = ensure_user(uname)
+    p_uname = user_obj.get("partnerUsername")
+    if not p_uname:
+        return (
+            "🔥 <b>Огонёк любви & Питомец пары</b>\n\n"
+            "Ты пока не в паре! Запусти приложение, выбери милого питомца, отправь ссылку своей половинке "
+            "и зажгите ваш общий огонёк любви 💞\n\n"
+            "✨ <b>10 стадий эволюции огонька:</b>\n"
+            "• 1-2 дня: Искорка ✨\n"
+            "• 3-6 дней: Озорной Огонёк 🔥\n"
+            "• 7-13 дней (1 нед.): Коронованный Пламенек 👑\n"
+            "• 14-20 дней (2 нед.): Огненный Лис-Дух 🦊\n"
+            "• 21-27 дней (3 нед.): Звёздный Огонёк ⭐\n"
+            "• 28-59 дней (1 мес.): Пламенный Хранитель 🕊️\n"
+            "• 60-89 дней (2 мес.): Аврора Любви 🌈\n"
+            "• 90-179 дней (3 мес.): Дракончик Пламени 🐉\n"
+            "• 180-364 дня (полгода): Вечное Сердце 💎\n"
+            "• 365+ дней (1 год): Солнечный Феникс ☀️\n\n"
+            f"🎁 Каждый день приносит вам по <b>+{DAILY_HEARTS_REWARD} 💕</b>!"
+        )
+
+    p_obj = ensure_user(p_uname)
+    care_info = p_obj.get("care", {})
+    flame = care_info.get("flameStage") or get_flame_stage_info(care_info.get("daysTogether", 1))
+    is_ext = care_info.get("partnerLeft", False)
+    days = care_info.get("daysTogether", 1)
+
+    if is_ext:
+        return (
+            f"💔 <b>Огонёк погас...</b>\n\n"
+            f"Пара распалась, потому что за питомцем не ухаживали более 24 часов.\n"
+            f"Восстановите пару в приложении за <b>{RESTORE_PARTNER_COST_HEARTS} 💕</b> (= 20 ⭐)!"
+        )
+
+    next_txt = (
+        f"\n🎯 <b>До следующей эволюции ({flame.get('nextName')}):</b> ещё {flame.get('daysToNext')} дн."
+        if flame.get("nextDays") else "\n👑 <b>Достигнут максимальный легендарный уровень!</b>"
+    )
+    return (
+        f"🔥 <b>Ваш Огонёк Любви:</b> вы вместе <b>{days} дн.</b>!\n\n"
+        f"🐾 <b>Текущий ранг:</b> {flame.get('title')}\n"
+        f"🏅 <b>Ранг:</b> {flame.get('badge')}\n"
+        f"📖 <i>«{flame.get('desc')}»</i>\n"
+        f"{next_txt}\n\n"
+        f"🎁 <b>Ежедневный бонус:</b> получайте <b>+{DAILY_HEARTS_REWARD} 💕</b> каждый день!"
+    )
+
+
+def build_hearts_info_text(uname: str) -> str:
+    user_obj = ensure_user(uname)
+    hearts_bal = user_obj.get("hearts", 0)
+    return (
+        f"💕 <b>Сердечки ChibiLove:</b>\n\n"
+        f"• Твой баланс: <b>{hearts_bal} 💕</b>\n"
+        f"• 🎁 <b>Бесплатные сердечки:</b> {INITIAL_FREE_HEARTS} 💕 автоматически на старте!\n"
+        f"• 🌟 <b>Ежедневная награда:</b> +{DAILY_HEARTS_REWARD} 💕 каждый день при входе в игру.\n"
+        f"• 💖 <b>Для чего нужны сердца:</b> исключительно для восстановления пары ({RESTORE_PARTNER_COST_HEARTS} 💕), если пропущен 24-часовой уход (первый раз бесплатно!).\n"
+        f"• ⭐ <b>Пополнение за Звёзды Telegram (при необходимости):</b>\n"
+        f"  — 20 ⭐ = 200 💕 (1 восстановление пары)\n"
+        f"  — 50 ⭐ = 500 💕\n"
+        f"  — 100 ⭐ = 1000 💕\n"
+    )
+
+
+def build_bot_main_markup(webapp_url: str, personal_url: str) -> dict:
+    rows = []
+    if webapp_url.startswith("https://"):
+        rows.append([{"text": "💞 Запустить ChibiLove 3D", "web_app": {"url": personal_url}}])
+    rows.append([
+        {"text": "🔥 Наш Огонёк и Питомец", "callback_data": "info_flame"},
+        {"text": "💕 Сердечки и Экономика", "callback_data": "info_hearts"},
+    ])
+    rows.append([{"text": "💬 Поддержка, реклама и сотрудничество", "callback_data": "open_support"}])
+    return {"inline_keyboard": rows}
+
+
+def configure_telegram_bot_menu():
+    commands_configured = False
+    metadata_configured = False
+    last_configured_url = None
+    while True:
+        if not metadata_configured:
+            # Set official Bot presentation
+            tg_api_call("setMyName", {"name": "ChibiLove 3D 💕 ЧибиПара"})
+            tg_api_call("setMyShortDescription", {
+                "short_description": "Твой уютный 3D-мир для двоих: создавай чибика как в RPG, заботься о половинке, расти огонёк и 3D-питомца любви! 💕"
+            })
+            tg_api_call("setMyDescription", {
+                "description": (
+                    "💞 ChibiLove — уютное 3D-приложение для влюблённых пар в Telegram!\n\n"
+                    "✨ Создай своего 3D-чибика как в RPG (выбор пола, причёски, одежда, глазки)\n"
+                    "🐾 Расти живого 3D-питомца огонька вокруг пары (10 стадий эволюции)\n"
+                    "🔥 Поддерживай огонёк заботой каждый день и получай +5 💕 ежедневно\n"
+                    "🤚 Гладь пальцем 3D-аватара любимого человека — он чувствует прикосновения!\n"
+                    "🎁 Наряжай половинку в милые аксессуары"
+                )
+            })
+            metadata_configured = True
+
+        if not commands_configured:
+            res_cmd = tg_api_call("setMyCommands", {
+                "commands": [
+                    {"command": "start", "description": "💞 Открыть ChibiLove и меню"},
+                    {"command": "flame", "description": "🔥 Стадия живого 3D-питомца и огонёк"},
+                    {"command": "hearts", "description": "💕 Баланс сердечек и ежедневная награда"},
+                    {"command": "support", "description": "💬 Поддержка, реклама и сотрудничество"},
+                ]
+            })
+            if res_cmd and res_cmd.get("ok"):
+                commands_configured = True
+
+        url = get_current_webapp_url()
+        if url.startswith("https://") and url != last_configured_url:
+            print(f"[Bot Setup] Configuring WebApp Menu Button -> {url}")
+            tg_api_call("setChatMenuButton", {
+                "menu_button": {
+                    "type": "web_app",
+                    "text": "💞 ChibiLove",
+                    "web_app": {"url": url}
+                }
+            })
+            last_configured_url = url
+        time.sleep(5)
+
+
+def telegram_polling_worker():
+    """Handles /start, app info, support tickets -> developer, pairing links, callbacks & Stars payments!"""
+    offset = 0
+    while True:
+        try:
+            res = tg_api_call("getUpdates", {"offset": offset, "timeout": 15})
+            if not res or not res.get("ok"):
+                time.sleep(3)
+                continue
+            for upd in res.get("result", []):
+                offset = upd["update_id"] + 1
+
+                # Handle Telegram Stars Pre-Checkout Query
+                if "pre_checkout_query" in upd:
+                    pq = upd["pre_checkout_query"]
+                    tg_api_call("answerPreCheckoutQuery", {
+                        "pre_checkout_query_id": pq["id"],
+                        "ok": True
+                    })
+                    continue
+
+                if "message" in upd:
+                    msg = upd["message"]
+                    chat_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
+                    from_user = msg.get("from", {})
+                    tg_id = from_user.get("id") or chat_id
+                    uname = normalize_username(from_user.get("username") or f"user_{tg_id}")
+                    first_name = from_user.get("first_name") or uname
+                    ensure_user(uname, display_name=first_name, tg_id=tg_id)
+
+                    # Handle Successful Telegram Stars Payment
+                    if "successful_payment" in msg:
+                        sp = msg["successful_payment"]
+                        charge_id = sp.get("telegram_payment_charge_id") or str(time.time())
+                        inv_payload = sp.get("invoice_payload") or ""
+                        parts = inv_payload.split(":")
+                        if len(parts) >= 4 and parts[0] == "hearts":
+                            target_uname = normalize_username(parts[1]) or uname
+                            add_hearts = int(parts[2])
+                            paid_stars = int(parts[3])
+                            with db_lock:
+                                conn = get_db()
+                                already = conn.execute("SELECT charge_id FROM processed_payments WHERE charge_id = ?", (charge_id,)).fetchone()
+                                if not already:
+                                    conn.execute(
+                                        "INSERT INTO processed_payments (charge_id, username, stars, hearts, created_at) VALUES (?, ?, ?, ?, ?)",
+                                        (charge_id, target_uname, paid_stars, add_hearts, time.time())
+                                    )
+                                    conn.execute("UPDATE users SET hearts = hearts + ? WHERE username = ?", (add_hearts, target_uname))
+                                    conn.commit()
+                                conn.close()
+                            tg_api_call("sendMessage", {
+                                "chat_id": tg_id,
+                                "parse_mode": "HTML",
+                                "text": f"🎉 Оплата прошла успешно! Тебе начислено <b>+{add_hearts} 💕</b> в ChibiLove!"
+                            })
+                        continue
+
+                    text = (msg.get("text") or "").strip()
+                    caption = (msg.get("caption") or "").strip()
+                    has_media = any(k in msg for k in ("photo", "video", "document", "voice", "sticker"))
+                    webapp_url = get_current_webapp_url()
+                    sep = "&" if "?" in webapp_url else "?"
+                    personal_url = f"{webapp_url}{sep}tg_user={uname}"
+
+                    # Command: /support
+                    if text.startswith("/support"):
+                        inline_text = text[len("/support"):].strip()
+                        if inline_text:
+                            set_support_session(tg_id, None)
+                            forward_support_ticket(tg_id, uname, first_name, inline_text, chat_id, msg.get("message_id"))
+                            tg_api_call("sendMessage", {
+                                "chat_id": tg_id,
+                                "parse_mode": "HTML",
+                                "text": "✅ Спасибо! Твоё обращение отправлено разработчику 💕",
+                                "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                            })
+                        else:
+                            set_support_session(tg_id, "awaiting_ticket")
+                            tg_api_call("sendMessage", {
+                                "chat_id": tg_id,
+                                "parse_mode": "HTML",
+                                "text": (
+                                    "💬 <b>Поддержка, реклама и сотрудничество ChibiLove</b>\n\n"
+                                    "Напиши жалобу, вопрос, идею или предложение по рекламе и сотрудничеству одним сообщением "
+                                    "(можно прикрепить скриншот) — оно сразу придёт разработчику:"
+                                ),
+                                "reply_markup": {
+                                    "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]
+                                }
+                            })
+                        continue
+
+                    # Command: /flame
+                    if text.startswith("/flame"):
+                        set_support_session(tg_id, None)
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": build_flame_info_text(uname),
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+                        continue
+
+                    # Command: /hearts
+                    if text.startswith("/hearts"):
+                        set_support_session(tg_id, None)
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": build_hearts_info_text(uname),
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+                        continue
+
+                    # Command: /start or /info
+                    if text.startswith("/start") or text.startswith("/info"):
+                        set_support_session(tg_id, None)
+                        parts = text.split()
+                        if text.startswith("/start") and len(parts) > 1 and parts[1].startswith("pair_"):
+                            inviter = normalize_username(parts[1][5:])
+                            if inviter and inviter != uname:
+                                ensure_user(inviter)
+                                with db_lock:
+                                    conn = get_db()
+                                    conn.execute(
+                                        "DELETE FROM pair_requests WHERE from_username = ? AND to_username = ? AND status = 'pending'",
+                                        (inviter, uname)
+                                    )
+                                    conn.execute(
+                                        "INSERT INTO pair_requests (from_username, from_name, to_username, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                                        (inviter, inviter, uname, time.time())
+                                    )
+                                    conn.commit()
+                                    conn.close()
+                                kb = [
+                                    [
+                                        {"text": "✅ Принять пару 💕", "callback_data": f"accept_pair:{inviter}"},
+                                        {"text": "❌ Отклонить", "callback_data": f"decline_pair:{inviter}"}
+                                    ]
+                                ]
+                                if webapp_url.startswith("https://"):
+                                    kb.append([{"text": "💞 Открыть ChibiLove 3D", "web_app": {"url": personal_url}}])
+                                kb.append([{"text": "💬 Поддержка и сотрудничество", "callback_data": "open_support"}])
+                                tg_api_call("sendMessage", {
+                                    "chat_id": tg_id,
+                                    "parse_mode": "HTML",
+                                    "text": (
+                                        f"💌 <b>@{html_esc(inviter)}</b> приглашает тебя стать парой в <b>ChibiLove</b>!\n\n"
+                                        f"{build_bot_info_text()}\n\n"
+                                        f"👇 Нажми <b>«✅ Принять пару 💕»</b> ниже:"
+                                    ),
+                                    "reply_markup": {"inline_keyboard": kb}
+                                })
+                                continue
+
+                        banner_img = BANNER_IMAGE_PATH if os.path.exists(BANNER_IMAGE_PATH) else AVATAR_IMAGE_PATH
+                        tg_send_photo(
+                            tg_id,
+                            banner_img,
+                            build_bot_info_text(first_name),
+                            build_bot_main_markup(webapp_url, personal_url)
+                        )
+                        continue
+
+                    # Check active support / admin-reply session!
+                    sess = get_support_session(tg_id)
+                    if sess and sess.get("mode") == "awaiting_ticket":
+                        set_support_session(tg_id, None)
+                        content = text or caption
+                        forward_support_ticket(tg_id, uname, first_name, content, chat_id, msg.get("message_id"))
+                        if has_media and content:
+                            tg_api_call("copyMessage", {
+                                "chat_id": get_admin_chat_id(),
+                                "from_chat_id": chat_id,
+                                "message_id": msg.get("message_id")
+                            })
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": "✅ Спасибо! Твоё сообщение передано разработчику 💕",
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+                        continue
+
+                    if sess and sess.get("mode") == "admin_reply" and sess.get("target_tg_id"):
+                        target_uid = int(sess["target_tg_id"])
+                        set_support_session(tg_id, None)
+                        reply_body = text or caption or ""
+                        if reply_body:
+                            tg_api_call("sendMessage", {
+                                "chat_id": target_uid,
+                                "parse_mode": "HTML",
+                                "text": f"💌 <b>Ответ поддержки ChibiLove:</b>\n\n{html_esc(reply_body)}"
+                            })
+                        if has_media:
+                            tg_api_call("copyMessage", {
+                                "chat_id": target_uid,
+                                "from_chat_id": chat_id,
+                                "message_id": msg.get("message_id")
+                            })
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": "✅ Ответ отправлен пользователю!"
+                        })
+                        continue
+
+                    # Default fallback if user writes random text to bot without command
+                    banner_img = BANNER_IMAGE_PATH if os.path.exists(BANNER_IMAGE_PATH) else AVATAR_IMAGE_PATH
+                    tg_send_photo(
+                        tg_id,
+                        banner_img,
+                        build_bot_info_text(first_name),
+                        build_bot_main_markup(webapp_url, personal_url)
+                    )
+
+                elif "callback_query" in upd:
+                    cb = upd["callback_query"]
+                    cb_id = cb.get("id")
+                    from_user = cb.get("from", {})
+                    tg_id = from_user.get("id")
+                    uname = normalize_username(from_user.get("username") or f"user_{tg_id}")
+                    data = cb.get("data") or ""
+                    webapp_url = get_current_webapp_url()
+                    sep = "&" if "?" in webapp_url else "?"
+                    personal_url = f"{webapp_url}{sep}tg_user={uname}"
+
+                    if data == "info_flame":
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": build_flame_info_text(uname),
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+
+                    elif data == "info_hearts":
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": build_hearts_info_text(uname),
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+
+                    elif data == "open_support":
+                        set_support_session(tg_id, "awaiting_ticket")
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": (
+                                "💬 <b>Поддержка, реклама и сотрудничество ChibiLove</b>\n\n"
+                                "Напиши жалобу, вопрос, идею или предложение по рекламе и сотрудничеству одним сообщением "
+                                "(можно прикрепить фото/скриншот) — оно сразу отправится разработчику:"
+                            ),
+                            "reply_markup": {
+                                "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]
+                            }
+                        })
+
+                    elif data == "cancel_support":
+                        set_support_session(tg_id, None)
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Отменено"})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": "Обращение отменено 🌸",
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+
+                    elif data.startswith("reply_support:"):
+                        target_uid = int(data.split(":", 1)[1])
+                        set_support_session(tg_id, "admin_reply", target_uid)
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": f"✍️ Введи ответ для пользователя (ID <code>{target_uid}</code>) одним сообщением:",
+                            "reply_markup": {
+                                "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]
+                            }
+                        })
+
+                    elif data.startswith("accept_pair:"):
+                        sender = normalize_username(data.split(":", 1)[1])
+                        pose = random.choice(POSES)
+                        now = time.time()
+                        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                        with db_lock:
+                            conn = get_db()
+                            conn.execute(
+                                "UPDATE pair_requests SET status = 'accepted' WHERE from_username = ? AND to_username = ?",
+                                (sender, uname)
+                            )
+                            conn.execute(
+                                "UPDATE users SET partner_username = ?, couple_pose = ?, streak_days = 1, paired_at = ?, last_cared_at = ?, last_streak_day = ?, partner_left = 0 WHERE username = ?",
+                                (uname, pose, now, now, today_str, sender)
+                            )
+                            conn.execute(
+                                "UPDATE users SET partner_username = ?, couple_pose = ?, streak_days = 1, paired_at = ?, last_cared_at = ?, last_streak_day = ?, partner_left = 0 WHERE username = ?",
+                                (sender, pose, now, now, today_str, uname)
+                            )
+                            conn.commit()
+                            conn.close()
+                        add_log(sender, uname, uname, f"💞 Пара @{sender} и @{uname} создана! Огонёк зажжён 🔥")
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Вы теперь пара в ChibiLove! 💞"})
+                        tg_api_call("sendMessage", {
+                            "chat_id": tg_id,
+                            "parse_mode": "HTML",
+                            "text": f"💞 Ура! Ты и <b>@{html_esc(sender)}</b> теперь пара в ChibiLove! Ваш огонёк 🔥 зажжён:",
+                            "reply_markup": build_bot_main_markup(webapp_url, personal_url)
+                        })
+                        notify_user_tg(sender, f"🎉 <b>@{html_esc(uname)}</b> принял(а) приглашение! Теперь вы пара в ChibiLove 💞")
+
+                    elif data.startswith("decline_pair:"):
+                        sender = normalize_username(data.split(":", 1)[1])
+                        with db_lock:
+                            conn = get_db()
+                            conn.execute(
+                                "UPDATE pair_requests SET status = 'declined' WHERE from_username = ? AND to_username = ?",
+                                (sender, uname)
+                            )
+                            conn.commit()
+                            conn.close()
+                        tg_api_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "Запрос отклонён"})
+
+        except Exception as e:
+            print(f"[Polling Error] {e}")
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    init_db()
+    threading.Thread(target=configure_telegram_bot_menu, daemon=True).start()
+    threading.Thread(target=telegram_polling_worker, daemon=True).start()
+    print(f"🌸 ChibiLove Server running on http://localhost:{PORT}")
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
+    server.serve_forever()

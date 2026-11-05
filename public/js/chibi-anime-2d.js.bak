@@ -1,0 +1,1280 @@
+// ============================================================================
+// ChibiLove (ЧибиПара) — World-Class 2D Anime Chibi & Live2D Animation Engine
+// Inspired by high-end Anime Chibi VTubers (Live2D Cubism style) & anime animation
+// Features:
+// - Ultra-detailed 2D anime chibi vector rendering with luminous anime eyes & gradient hair
+// - Interactive finger stroking (поглаживание пальцем) with sweet blush, squinting eyes & heart trails
+// - Full Live2D-style autonomous animations: breathing, blinking, looking around, giggling, waving
+// - "Вместе" couple scenes: holding hands, hugs, headpats, Kanna-style synchronized dance, sleep
+// - 2D Animated Flame Spirit Pet (Огонёк) with 10 evolution tiers
+// - 4 care stages (hunger, clean, energy, sleep) + 14 accessories + boy/girl anatomy & hairstyles
+// ============================================================================
+
+(function () {
+  "use strict";
+
+  const STYLE_CSS = `
+    @keyframes floatUpFade {
+      0% {
+        opacity: 0;
+        transform: translate(-50%, -40%) scale(0.6) rotate(0deg);
+      }
+      20% {
+        opacity: 1;
+        transform: translate(calc(-50% + var(--drift-x, 0px) * 0.3), calc(-50% - 25px)) scale(1.2) rotate(var(--drift-rot, 0deg));
+      }
+      100% {
+        opacity: 0;
+        transform: translate(calc(-50% + var(--drift-x, 0px)), calc(-50% - 75px)) scale(0.85) rotate(calc(var(--drift-rot, 0deg) * 1.5));
+      }
+    }
+
+    @keyframes popInBubble {
+      0% {
+        opacity: 0;
+        transform: translate(-50%, 8px) scale(0.7);
+      }
+      60% {
+        opacity: 1;
+        transform: translate(-50%, -4px) scale(1.06);
+      }
+      100% {
+        opacity: 1;
+        transform: translate(-50%, 0) scale(1);
+      }
+    }
+
+    .chibi-pet-speech-bubble {
+      position: absolute;
+      top: 10%;
+      left: 50%;
+      transform: translate(-50%, 8px) scale(0.7);
+      background: rgba(255, 255, 255, 0.96);
+      color: #BE123C;
+      font-size: 13.5px;
+      font-weight: 800;
+      padding: 7px 16px;
+      border-radius: 22px;
+      box-shadow: 0 6px 24px rgba(244, 63, 94, 0.28);
+      border: 2px solid #FDA4AF;
+      pointer-events: none;
+      z-index: 35;
+      white-space: nowrap;
+      opacity: 0;
+      transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .chibi-pet-speech-bubble.active {
+      opacity: 1;
+      transform: translate(-50%, 0) scale(1);
+      animation: popInBubble 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    }
+    .chibi-pet-speech-bubble::after {
+      content: '';
+      position: absolute;
+      bottom: -7px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 0;
+      height: 0;
+      border-left: 7px solid transparent;
+      border-right: 7px solid transparent;
+      border-top: 7px solid #FDA4AF;
+    }
+  `;
+
+  if (typeof document !== "undefined" && !document.getElementById("chibi-2d-styles")) {
+    const s = document.createElement("style");
+    s.id = "chibi-2d-styles";
+    s.textContent = STYLE_CSS;
+    document.head.appendChild(s);
+  }
+
+  const PET_PHRASES_T1 = [
+    "Ой~ как тепло 🥰",
+    "Твои ручки? ✨",
+    "Ммм~ нежно 🌸",
+    "Щекотно хи-хи! 🤭",
+    "Гладишь меня? 💕",
+    "Так приятно... ☺️",
+  ];
+  const PET_PHRASES_T2 = [
+    "Мрр~ так приятно! 💕",
+    "Ещё погладь меня~ 🥰",
+    "Уиии, мур-мур! 🌸",
+    "Таю от нежности... 💖",
+    "Ручки самые тёплые на свете ✨",
+    "Не останавливайся~ 💞",
+  ];
+  const PET_PHRASES_T3 = [
+    "Обожаю твои ручки! 💖✨",
+    "Самый любимый человек! 💞",
+    "Счастье зашкаливает~ 🥰💕",
+    "Мур-мур-мур! Ты моё солнышко ☀️💖",
+    "Никому тебя не отдам! 💝",
+    "Ты самое дорогое, что у меня есть! ✨",
+  ];
+
+  const haptic = (type = "light") => {
+    try {
+      if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.HapticFeedback) {
+        if (type === "medium") window.Telegram.WebApp.HapticFeedback.impactOccurred("medium");
+        else if (type === "success") window.Telegram.WebApp.HapticFeedback.notificationOccurred("success");
+        else window.Telegram.WebApp.HapticFeedback.impactOccurred("light");
+      }
+    } catch (e) {}
+  };
+
+  // Helper color adjuster
+  function shadeColor(color, percent) {
+    if (!color || !color.startsWith("#") || (color.length !== 7 && color.length !== 4)) return color;
+    let num = parseInt(color.slice(1), 16);
+    let amt = Math.round(2.55 * percent);
+    let R = (num >> 16) + amt;
+    let G = ((num >> 8) & 0x00ff) + amt;
+    let B = (num & 0x0000ff) + amt;
+    return (
+      "#" +
+      (
+        0x1000000 +
+        (R < 255 ? (R < 1 ? 0 : R) : 255) * 0x10000 +
+        (G < 255 ? (G < 1 ? 0 : G) : 255) * 0x100 +
+        (B < 255 ? (B < 1 ? 0 : B) : 255)
+      )
+        .toString(16)
+        .slice(1)
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // 1. Anime Chibi SVG Layer Builder (High-End Anime VTuber Aesthetic)
+  // --------------------------------------------------------------------------
+  function buildAnimeChibiSVG(avatar, state = {}) {
+    const av = avatar || {};
+    const gender = av.gender || "girl";
+    const skin = av.skinColor || "#FFE5D9";
+    const skinShadow = shadeColor(skin, -16);
+    const skinDeepShadow = shadeColor(skin, -26);
+    const eyeColor = av.eyeColor || "#3B7A57";
+    const eyeColorBright = shadeColor(eyeColor, 35);
+    const eyeColorDeep = shadeColor(eyeColor, -35);
+    const hairStyle = av.hairStyle || (gender === "girl" ? "long_hime" : "fluffy_boy");
+    const hairColor = av.hairColor || "#3D2B1F";
+    const hairColorTip = shadeColor(hairColor, 32);
+    const hairHighlight = shadeColor(hairColor, 55);
+    const outfitStyle = av.outfitStyle || (gender === "girl" ? "pleated_dress" : "hoodie_cozy");
+    const outfitColor = av.outfitColor || (gender === "girl" ? "#F472B6" : "#2B4570");
+    const outfitDark = shadeColor(outfitColor, -25);
+    const blushStyle = av.blushStyle || "anime_glow";
+    const accessories = new Set(state.accessories || []);
+    const care = state.care || { hungerStage: 4, cleanStage: 4, energyStage: 4, isSleeping: false };
+    const mood = state.mood || null;
+
+    // Enhanced Petting Physics & Live2D Rigging State
+    const petLevel = Math.max(0, Math.min(1.0, state.petLevel != null ? state.petLevel : (state.isPetted ? 1.0 : 0.0)));
+    const petFollowX = Math.max(-1, Math.min(1, state.petFollowX || 0));
+    const petFollowY = Math.max(-1, Math.min(1, state.petFollowY || 0));
+    const isPetted = Boolean(state.isPetted || petLevel > 0.12);
+    const isSleeping = Boolean(care.isSleeping);
+    const isHungry = (care.hungerStage || 4) <= 2;
+    const isDirty = (care.cleanStage || 4) <= 2;
+    const isTired = (care.energyStage || 4) <= 2;
+    const blink = state.blink || 0; // 0 = open, 1 = closed
+    const lookX = state.lookX || 0; // -1 to 1
+    const lookY = state.lookY || 0;
+    const time = state.time || 0;
+
+    // Head rotation follows finger position during petting (up to ±14°) + gentle breathing idle tilt
+    const idleTilt = state.headTilt != null ? state.headTilt : (Math.sin(time * 1.5) * 2.2);
+    const headTilt = (idleTilt + (petFollowX * 13.5 * petLevel)).toFixed(2);
+
+    // Mochi squish & purring vibration when finger strokes cheeks!
+    const purrVibe = petLevel > 0.35 ? (Math.sin(time * 22.0) * 0.016 * petLevel) : 0;
+    const headSquishX = (1.0 + (petLevel * 0.08) + purrVibe).toFixed(3);
+    const headSquishY = (1.0 - (petLevel * 0.09) - purrVibe).toFixed(3);
+
+    // Breathing Bob & Affectionate Body Sway
+    const breathBob = Math.sin(time * 2.4) * 2.6;
+    const purrHop = petLevel > 0.35 ? (Math.abs(Math.sin(time * 8.5)) * 2.4 * petLevel) : 0;
+    const bodyShiftX = (petFollowX * 5.0 * petLevel).toFixed(2);
+    const bodyShiftY = (breathBob - purrHop).toFixed(2);
+
+    const currentAction = state.currentAction || "idle"; // idle, wave, giggle, eat, dance
+    const armPose = state.armPose || "normal";
+    const uid = state.uid || ("chibi_" + Math.random().toString(36).slice(2, 7));
+
+    // 1. Back Accessories (Wings, Cat Tail, Long hair)
+    let backAccSVG = "";
+    if (accessories.has("fairy_wings")) {
+      backAccSVG += `
+        <g class="anime-wings">
+          <path d="M96,178 C35,120 18,190 68,222 C38,242 54,278 104,242 Z" fill="rgba(255,255,255,0.78)" stroke="#C084FC" stroke-width="2.6" filter="drop-shadow(0 2px 6px rgba(192,132,252,0.5))"/>
+          <path d="M164,178 C225,120 242,190 192,222 C222,242 206,278 156,242 Z" fill="rgba(255,255,255,0.78)" stroke="#C084FC" stroke-width="2.6" filter="drop-shadow(0 2px 6px rgba(192,132,252,0.5))"/>
+        </g>
+      `;
+    }
+    if (accessories.has("cat_tail")) {
+      backAccSVG += `
+        <g class="anime-tail">
+          <path d="M152,246 C195,264 242,238 236,190 C232,162 200,166 202,194 C204,216 182,232 152,228 Z" fill="${hairColor}" stroke="#1E1E24" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M228,188 C236,176 242,184 238,198 Z" fill="${hairColorTip}"/>
+        </g>
+      `;
+    }
+
+    // 2. Back Hair
+    let backHairSVG = "";
+    if (hairStyle === "long_hime") {
+      backHairSVG = `
+        <g class="anime-back-hair">
+          <path d="M58,102 C44,168 46,236 64,264 C82,272 104,268 112,255 L148,255 C156,268 178,272 196,264 C214,236 216,168 202,102 Z" fill="url(#hairGrad_${uid})" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+        </g>
+      `;
+    } else if (hairStyle === "twin_tails") {
+      backHairSVG = `
+        <g class="anime-back-hair">
+          <path d="M62,104 C22,120 16,206 38,252 C52,258 68,240 70,198 Z" fill="url(#hairGrad_${uid})" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+          <path d="M198,104 C238,120 244,206 222,252 C208,258 192,240 190,198 Z" fill="url(#hairGrad_${uid})" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+          <ellipse cx="62" cy="106" rx="7" ry="5" fill="#FB7185"/>
+          <ellipse cx="198" cy="106" rx="7" ry="5" fill="#FB7185"/>
+        </g>
+      `;
+    } else if (hairStyle === "high_ponytail") {
+      backHairSVG = `
+        <g class="anime-back-hair">
+          <path d="M158,58 C212,42 242,115 220,182 C204,174 194,142 178,100 Z" fill="url(#hairGrad_${uid})" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+          <ellipse cx="164" cy="62" rx="8" ry="6" fill="#F43F5E"/>
+        </g>
+      `;
+    } else if (hairStyle === "bob_cute" || hairStyle === "messy_curly") {
+      backHairSVG = `
+        <g class="anime-back-hair">
+          <path d="M54,106 C44,158 56,196 76,204 L184,204 C204,196 216,158 206,106 Z" fill="url(#hairGrad_${uid})" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+        </g>
+      `;
+    }
+
+    // 3. Body & Arms
+    let leftArmSVG = "";
+    let rightArmSVG = "";
+
+    if (currentAction === "wave") {
+      leftArmSVG = `<path d="M104,185 C88,198 76,218 72,230 C70,236 78,240 84,235 C92,226 100,212 106,204" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+      rightArmSVG = `
+        <g class="anime-wave-hand">
+          <path d="M156,182 C178,162 195,134 204,118 C208,110 216,116 212,124 C202,142 186,172 162,198" fill="${skin}" stroke="#1E1E24" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="208" cy="116" r="7" fill="${skin}" stroke="#1E1E24" stroke-width="2.6"/>
+          <line x1="204" y1="110" x2="204" y2="104" stroke="#FB7185" stroke-width="2" stroke-linecap="round"/>
+          <line x1="214" y1="112" x2="218" y2="106" stroke="#FB7185" stroke-width="2" stroke-linecap="round"/>
+        </g>
+      `;
+    } else if (armPose === "open_hug" || currentAction === "giggle" || petLevel > 0.35) {
+      leftArmSVG = `<path d="M104,184 C84,186 68,192 56,198 C50,201 54,209 62,207 C76,204 92,199 105,197" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+      rightArmSVG = `<path d="M156,184 C176,186 192,192 204,198 C210,201 206,209 198,207 C184,204 168,199 155,197" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+    } else if (armPose === "hold_right") {
+      leftArmSVG = `<path d="M104,185 C88,198 76,218 72,230" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+      rightArmSVG = `<path d="M156,185 C178,194 198,210 212,216 C218,218 214,226 206,224 C190,218 170,206 154,198" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+    } else if (armPose === "hold_left") {
+      leftArmSVG = `<path d="M104,185 C82,194 62,210 48,216 C42,218 46,226 54,224 C70,218 90,206 106,198" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+      rightArmSVG = `<path d="M156,185 C172,198 184,218 188,230" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+    } else {
+      leftArmSVG = `<path d="M104,185 C88,198 76,218 72,230 C70,236 78,240 84,235 C92,226 100,212 106,204" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+      rightArmSVG = `<path d="M156,185 C172,198 184,218 188,230 C190,236 182,240 176,235 C168,226 160,212 154,204" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>`;
+    }
+
+    const legWearSVG =
+      gender === "girl"
+        ? `
+        <!-- Girl stockings & cute anime shoes -->
+        <path d="M99,256 L125,256 L124,290 L108,290 C102,288 100,275 99,256 Z" fill="#F8FAFC" stroke="#1E1E24" stroke-width="2.4"/>
+        <path d="M135,256 L161,256 L160,275 C159,286 155,289 148,290 L136,290 Z" fill="#F8FAFC" stroke="#1E1E24" stroke-width="2.4"/>
+        <path d="M101,273 L125,273 L124,291 L108,291 C103,290 101,283 101,273 Z" fill="#1E293B" stroke="#0F172A" stroke-width="2.4"/>
+        <path d="M135,273 L159,273 C159,283 157,290 152,291 L136,291 Z" fill="#1E293B" stroke="#0F172A" stroke-width="2.4"/>
+        <ellipse cx="114" cy="275" rx="3.5" ry="2" fill="#FB7185"/>
+        <ellipse cx="146" cy="275" rx="3.5" ry="2" fill="#FB7185"/>
+      `
+        : `
+        <!-- Boy dark trousers & modern sneakers -->
+        <path d="M98,242 L162,242 L160,276 L135,276 L130,254 L125,276 L100,276 Z" fill="#1E293B" stroke="#1E1E24" stroke-width="2.5"/>
+        <path d="M100,275 L125,275 L124,291 L106,291 C101,290 100,283 100,275 Z" fill="#F8FAFC" stroke="#1E1E24" stroke-width="2.4"/>
+        <path d="M135,275 L160,275 C160,283 159,290 154,291 L136,291 Z" fill="#F8FAFC" stroke="#1E1E24" stroke-width="2.4"/>
+        <line x1="101" y1="285" x2="124" y2="285" stroke="${outfitColor}" stroke-width="3"/>
+        <line x1="136" y1="285" x2="159" y2="285" stroke="${outfitColor}" stroke-width="3"/>
+      `;
+
+    // 4. Outfits
+    let outfitSVG = "";
+    if (outfitStyle === "pleated_dress") {
+      outfitSVG = `
+        <g class="anime-outfit">
+          <path d="M84,254 Q96,263 108,255 Q120,263 130,255 Q140,263 152,255 Q164,263 176,254 L170,244 L90,244 Z" fill="#F8FAFC" stroke="#1E1E24" stroke-width="2.2"/>
+          <path d="M96,225 L164,225 C174,236 180,246 178,252 C164,258 148,256 130,256 C112,256 96,258 82,252 C80,246 86,236 96,225 Z" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <path d="M104,178 L156,178 L163,227 L97,227 Z" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <!-- Anime Lolita White Collar & Black Ribbon Bow (like Minty reference) -->
+          <path d="M112,178 C112,192 128,198 130,198 C132,198 148,192 148,178 Z" fill="#FFFFFF" stroke="#1E1E24" stroke-width="2"/>
+          <path d="M130,186 L122,195 L125,200 L130,192 L135,200 L138,195 Z" fill="#18181B" stroke="#000000" stroke-width="1.8"/>
+          <circle cx="130" cy="188" r="3" fill="#F43F5E"/>
+        </g>
+      `;
+    } else if (outfitStyle === "hoodie_cozy") {
+      outfitSVG = `
+        <g class="anime-outfit">
+          <path d="M98,236 L162,236 L161,260 L135,260 L130,250 L125,260 L99,260 Z" fill="#334155" stroke="#1E1E24" stroke-width="2.5"/>
+          <path d="M98,178 C86,188 84,218 92,242 L168,242 C176,218 174,188 162,178 Z" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <path d="M108,218 L152,218 L156,236 L104,236 Z" fill="${outfitDark}" stroke="#1E1E24" stroke-width="2"/>
+          <line x1="122" y1="184" x2="122" y2="206" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round"/>
+          <line x1="138" y1="184" x2="138" y2="206" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round"/>
+          <circle cx="122" cy="207" r="2" fill="#FB7185"/>
+          <circle cx="138" cy="207" r="2" fill="#FB7185"/>
+        </g>
+      `;
+    } else if (outfitStyle === "school_seifuku") {
+      outfitSVG = `
+        <g class="anime-outfit">
+          <path d="M92,226 L168,226 L176,253 L84,253 Z" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.6"/>
+          <path d="M100,178 L160,178 L163,228 L97,228 Z" fill="#FFFFFF" stroke="#1E1E24" stroke-width="2.6"/>
+          <path d="M104,178 L130,204 L156,178" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.4"/>
+          <path d="M130,198 L118,210 L125,214 L130,204 L135,214 L142,210 Z" fill="#E11D48" stroke="#1E1E24" stroke-width="1.8"/>
+        </g>
+      `;
+    } else {
+      outfitSVG = `
+        <g class="anime-outfit">
+          <path d="M98,178 L162,178 L165,244 L95,244 Z" fill="${outfitColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <circle cx="130" cy="208" r="14" fill="#FFFFFF" opacity="0.3"/>
+          <path d="M130,202 C124,195 115,200 120,209 L130,218 L140,209 C145,200 136,195 130,202 Z" fill="#F43F5E"/>
+        </g>
+      `;
+    }
+
+    // Mid Accessories (Scarf, Headphones, Plush Bear)
+    let midAccSVG = "";
+    if (accessories.has("cozy_scarf")) {
+      midAccSVG += `
+        <g class="acc-scarf">
+          <path d="M102,172 C118,182 142,182 158,172 C164,178 162,190 154,192 C136,196 124,196 106,192 C98,190 96,178 102,172 Z" fill="#E11D48" stroke="#1E1E24" stroke-width="2.6"/>
+          <path d="M138,186 L146,222 L160,218 L152,184 Z" fill="#BE123C" stroke="#1E1E24" stroke-width="2.4"/>
+        </g>
+      `;
+    }
+    if (accessories.has("plush_bear")) {
+      midAccSVG += `
+        <g class="acc-bear" transform="translate(68, 202)">
+          <circle cx="10" cy="8" r="6" fill="#B45309" stroke="#1E1E24" stroke-width="2"/>
+          <circle cx="28" cy="8" r="6" fill="#B45309" stroke="#1E1E24" stroke-width="2"/>
+          <circle cx="19" cy="16" r="12" fill="#D97706" stroke="#1E1E24" stroke-width="2.2"/>
+          <ellipse cx="19" cy="29" rx="11" ry="10" fill="#D97706" stroke="#1E1E24" stroke-width="2.2"/>
+          <circle cx="15" cy="14" r="2" fill="#1E1E24"/>
+          <circle cx="23" cy="14" r="2" fill="#1E1E24"/>
+          <ellipse cx="19" cy="18" rx="4" ry="3" fill="#FEF3C7"/>
+        </g>
+      `;
+    }
+
+    // 5. Head Base & Cute Anime Ears
+    const headBaseSVG = `
+      <g class="anime-head-base">
+        <!-- Elf Ears (like in Minty reference) / Cute Chibi Ears -->
+        <path d="M68,124 C46,112 40,136 64,148 C68,150 72,148 74,144" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>
+        <path d="M62,128 C54,126 52,138 63,142" fill="none" stroke="${skinShadow}" stroke-width="2" stroke-linecap="round"/>
+        <path d="M192,124 C214,112 220,136 196,148 C192,150 188,148 186,144" fill="${skin}" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>
+        <path d="M198,128 C206,126 208,138 197,142" fill="none" stroke="${skinShadow}" stroke-width="2" stroke-linecap="round"/>
+
+        <!-- Soft Mochi Head Contour -->
+        <path d="M130,50 C76,50 62,84 64,124 C66,158 96,174 130,174 C164,174 194,158 196,124 C198,84 184,50 130,50 Z"
+              fill="${skin}" stroke="#1E1E24" stroke-width="3.2" stroke-linejoin="round"/>
+      </g>
+    `;
+
+    // 6. Airbrush Soft Blush
+    let blushSVG = "";
+    const blushOpacity = Math.min(1.0, 0.55 + petLevel * 0.45);
+    const blushScale = 1.0 + petLevel * 0.45;
+    blushSVG = `
+      <g class="anime-blush" opacity="${blushOpacity}">
+        <ellipse cx="86" cy="146" rx="${12 * blushScale}" ry="${6.5 * blushScale}" fill="#FDA4AF" opacity="0.6"/>
+        <ellipse cx="174" cy="146" rx="${12 * blushScale}" ry="${6.5 * blushScale}" fill="#FDA4AF" opacity="0.6"/>
+        <line x1="82" y1="148" x2="85" y2="143" stroke="#E11D48" stroke-width="2" stroke-linecap="round"/>
+        <line x1="87" y1="149" x2="90" y2="144" stroke="#E11D48" stroke-width="2" stroke-linecap="round"/>
+        <line x1="170" y1="149" x2="173" y2="144" stroke="#E11D48" stroke-width="2" stroke-linecap="round"/>
+        <line x1="175" y1="148" x2="178" y2="143" stroke="#E11D48" stroke-width="2" stroke-linecap="round"/>
+        ${petLevel > 0.72 ? `
+          <!-- Tier 3 Overjoyed Floating Cheek Sparkles -->
+          <circle cx="70" cy="144" r="2.5" fill="#FB7185"/>
+          <circle cx="190" cy="144" r="2.5" fill="#FB7185"/>
+          <path d="M74,136 Q77,133 80,136" fill="none" stroke="#E11D48" stroke-width="1.8"/>
+          <path d="M180,136 Q183,133 186,136" fill="none" stroke="#E11D48" stroke-width="1.8"/>
+        ` : ""}
+      </g>
+    `;
+
+    // 7. World-Class Anime Eyes (Live2D-grade with escalating 3-tier affection)
+    let eyesSVG = "";
+
+    if (isSleeping) {
+      eyesSVG = `
+        <g class="anime-eyes-sleeping">
+          <path d="M88,136 Q103,144 116,136" fill="none" stroke="#1E1E24" stroke-width="3.6" stroke-linecap="round"/>
+          <path d="M144,136 Q157,144 172,136" fill="none" stroke="#1E1E24" stroke-width="3.6" stroke-linecap="round"/>
+        </g>
+      `;
+    } else if (petLevel > 0.8) {
+      // Tier 3: Overjoyed Radiant Heart Eyes (♡‿♡)
+      eyesSVG = `
+        <g class="anime-eyes-heart">
+          <ellipse cx="102" cy="136" rx="14" ry="16" fill="#FFF1F2"/>
+          <ellipse cx="158" cy="136" rx="14" ry="16" fill="#FFF1F2"/>
+          <!-- Ruby Heart Pupils -->
+          <path d="M96,134 C90,123 100,117 102,126 C104,117 114,123 108,134 L102,142 Z" fill="#E11D48" stroke="#18181B" stroke-width="2.2"/>
+          <path d="M152,134 C146,123 156,117 158,126 C160,117 170,123 164,134 L158,142 Z" fill="#E11D48" stroke="#18181B" stroke-width="2.2"/>
+          <!-- Specular Sparkles -->
+          <circle cx="105" cy="127" r="2.2" fill="#FFFFFF"/>
+          <circle cx="161" cy="127" r="2.2" fill="#FFFFFF"/>
+          <circle cx="98" cy="137" r="1.4" fill="#FFFFFF"/>
+          <circle cx="154" cy="137" r="1.4" fill="#FFFFFF"/>
+          <!-- Joyful Upper Eyelashes -->
+          <path d="M85,128 C92,118 112,118 120,126" fill="none" stroke="#18181B" stroke-width="4.2" stroke-linecap="round"/>
+          <path d="M140,126 C148,118 168,118 175,128" fill="none" stroke="#18181B" stroke-width="4.2" stroke-linecap="round"/>
+        </g>
+      `;
+    } else if (petLevel > 0.45) {
+      // Tier 2: Blissful Curved Closed Eyes ( ˘͈ ᵕ ˘͈ )
+      eyesSVG = `
+        <g class="anime-eyes-bliss">
+          <path d="M85,138 Q102,118 119,138" fill="none" stroke="#18181B" stroke-width="4.4" stroke-linecap="round"/>
+          <path d="M87,140 Q102,122 117,140" fill="none" stroke="#FB7185" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M141,138 Q158,118 175,138" fill="none" stroke="#18181B" stroke-width="4.4" stroke-linecap="round"/>
+          <path d="M143,140 Q158,122 173,140" fill="none" stroke="#FB7185" stroke-width="2.4" stroke-linecap="round"/>
+          <line x1="84" y1="135" x2="80" y2="132" stroke="#18181B" stroke-width="2.4" stroke-linecap="round"/>
+          <line x1="176" y1="135" x2="180" y2="132" stroke="#18181B" stroke-width="2.4" stroke-linecap="round"/>
+        </g>
+      `;
+    } else if (petLevel > 0.15 || currentAction === "giggle") {
+      // Tier 1: Gentle Squint Crescents (^‿^)
+      eyesSVG = `
+        <g class="anime-eyes-gentle">
+          <path d="M87,137 Q102,125 117,137" fill="none" stroke="#18181B" stroke-width="4.0" stroke-linecap="round"/>
+          <path d="M143,137 Q158,125 173,137" fill="none" stroke="#18181B" stroke-width="4.0" stroke-linecap="round"/>
+          <line x1="85" y1="135" x2="82" y2="132" stroke="#18181B" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="175" y1="135" x2="178" y2="132" stroke="#18181B" stroke-width="2.2" stroke-linecap="round"/>
+        </g>
+      `;
+    } else if (blink > 0.5) {
+      // Blinking frame
+      eyesSVG = `
+        <g class="anime-eyes-blinking">
+          <path d="M86,136 Q102,142 118,136" fill="none" stroke="#1E1E24" stroke-width="3.8" stroke-linecap="round"/>
+          <path d="M142,136 Q158,142 174,136" fill="none" stroke="#1E1E24" stroke-width="3.8" stroke-linecap="round"/>
+        </g>
+      `;
+    } else {
+      // Open Luminous Anime Eyes
+      const px = lookX * 4;
+      const py = lookY * 3;
+
+      eyesSVG = `
+        <g class="anime-eyes-open">
+          <defs>
+            <!-- Clip Path for Left Eye -->
+            <clipPath id="eyeClipL_${uid}">
+              <ellipse cx="102" cy="135" rx="15" ry="17"/>
+            </clipPath>
+            <!-- Clip Path for Right Eye -->
+            <clipPath id="eyeClipR_${uid}">
+              <ellipse cx="158" cy="135" rx="15" ry="17"/>
+            </clipPath>
+            <!-- Multi-layer Anime Iris Gradient -->
+            <radialGradient id="irisGrad_${uid}" cx="50%" cy="65%" r="55%">
+              <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.8"/>
+              <stop offset="25%" stop-color="${eyeColorBright}"/>
+              <stop offset="65%" stop-color="${eyeColor}"/>
+              <stop offset="100%" stop-color="${eyeColorDeep}"/>
+            </radialGradient>
+          </defs>
+
+          <!-- Sclera (White of Eye) with soft upper eyelid shadow -->
+          <ellipse cx="102" cy="135" rx="15" ry="17" fill="#FFFFFF"/>
+          <ellipse cx="158" cy="135" rx="15" ry="17" fill="#FFFFFF"/>
+          <path d="M87,126 C94,132 110,132 117,126 Z" fill="rgba(199, 210, 254, 0.45)"/>
+          <path d="M143,126 C150,132 166,132 173,126 Z" fill="rgba(199, 210, 254, 0.45)"/>
+
+          <!-- LEFT EYE IRIS & HIGHLIGHTS -->
+          <g clip-path="url(#eyeClipL_${uid})">
+            <!-- Iris Body -->
+            <ellipse cx="${102 + px}" cy="${136 + py}" rx="12" ry="15" fill="url(#irisGrad_${uid})"/>
+            <!-- Dark Pupil with inner glow -->
+            <ellipse cx="${102 + px}" cy="${136 + py}" rx="5.5" ry="7" fill="#09090B"/>
+            <circle cx="${102 + px}" cy="${137 + py}" r="2.2" fill="${eyeColorBright}" opacity="0.8"/>
+            <!-- Bottom Rim Light Arc -->
+            <path d="M${94 + px},${143 + py} Q${102 + px},${150 + py} ${110 + px},${143 + py}" fill="none" stroke="${eyeColorBright}" stroke-width="2.2" stroke-linecap="round"/>
+            <!-- Big Catchlight Highlight -->
+            <ellipse cx="${98 + px * 0.7}" cy="${130 + py * 0.7}" rx="4.5" ry="5.5" fill="#FFFFFF"/>
+            <!-- Small Secondary Catchlight Sparkle -->
+            <circle cx="${107 + px * 0.7}" cy="${142 + py * 0.7}" r="2" fill="#FFFFFF" opacity="0.9"/>
+          </g>
+
+          <!-- RIGHT EYE IRIS & HIGHLIGHTS -->
+          <g clip-path="url(#eyeClipR_${uid})">
+            <!-- Iris Body -->
+            <ellipse cx="${158 + px}" cy="${136 + py}" rx="12" ry="15" fill="url(#irisGrad_${uid})"/>
+            <!-- Dark Pupil with inner glow -->
+            <ellipse cx="${158 + px}" cy="${136 + py}" rx="5.5" ry="7" fill="#09090B"/>
+            <circle cx="${158 + px}" cy="${137 + py}" r="2.2" fill="${eyeColorBright}" opacity="0.8"/>
+            <!-- Bottom Rim Light Arc -->
+            <path d="M${150 + px},${143 + py} Q${158 + px},${150 + py} ${166 + px},${143 + py}" fill="none" stroke="${eyeColorBright}" stroke-width="2.2" stroke-linecap="round"/>
+            <!-- Big Catchlight Highlight -->
+            <ellipse cx="${154 + px * 0.7}" cy="${130 + py * 0.7}" rx="4.5" ry="5.5" fill="#FFFFFF"/>
+            <!-- Small Secondary Catchlight Sparkle -->
+            <circle cx="${163 + px * 0.7}" cy="${142 + py * 0.7}" r="2" fill="#FFFFFF" opacity="0.9"/>
+          </g>
+
+          <!-- Bold Styled Upper Eyelashes with Wing Tip -->
+          <path d="M85,130 C92,120 112,120 120,128" fill="none" stroke="#18181B" stroke-width="4.2" stroke-linecap="round"/>
+          <path d="M120,128 L123,124" stroke="#18181B" stroke-width="2.8" stroke-linecap="round"/>
+          <path d="M85,130 L83,126" stroke="#18181B" stroke-width="2.4" stroke-linecap="round"/>
+
+          <path d="M140,128 C148,120 168,120 175,130" fill="none" stroke="#18181B" stroke-width="4.2" stroke-linecap="round"/>
+          <path d="M175,130 L177,126" stroke="#18181B" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M140,128 L137,124" stroke="#18181B" stroke-width="2.8" stroke-linecap="round"/>
+
+          <!-- Delicate Lower Lash Lines -->
+          <path d="M92,149 Q102,153 112,149" fill="none" stroke="#27272A" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M148,149 Q158,153 168,149" fill="none" stroke="#27272A" stroke-width="1.8" stroke-linecap="round"/>
+        </g>
+      `;
+    }
+
+    // 8. Eyebrows & Mouth
+    const browY = isPetted || currentAction === "giggle" ? 108 : 110;
+    const browsSVG = `
+      <g class="anime-brows">
+        <path d="M88,${browY} Q102,${browY - 3} 115,${browY}" fill="none" stroke="#1E1E24" stroke-width="3.2" stroke-linecap="round"/>
+        <path d="M145,${browY} Q158,${browY - 3} 172,${browY}" fill="none" stroke="#1E1E24" stroke-width="3.2" stroke-linecap="round"/>
+      </g>
+    `;
+
+    let mouthSVG = "";
+    if (petLevel > 0.75) {
+      // Joyful open smile with pink tongue (≧◡≦)
+      mouthSVG = `
+        <g class="anime-mouth-joy">
+          <path d="M120,152 Q130,167 140,152 Z" fill="#E11D48" stroke="#1E1E24" stroke-width="2.2"/>
+          <path d="M124,157 Q130,166 136,157 Z" fill="#FDA4AF"/>
+        </g>
+      `;
+    } else if (petLevel > 0.25 || currentAction === "giggle") {
+      // Sweet kitty smile (:3)
+      mouthSVG = `
+        <path d="M122,154 Q126,158 130,155 Q134,158 138,154" fill="none" stroke="#1E1E24" stroke-width="2.8" stroke-linecap="round"/>
+      `;
+    } else if (isHungry || mood === "sad" || mood === "offended") {
+      // Pouty squish mouth (3:)
+      mouthSVG = `
+        <path d="M124,158 Q130,152 136,158" fill="none" stroke="#1E1E24" stroke-width="2.6" stroke-linecap="round"/>
+      `;
+    } else if (currentAction === "eat") {
+      // Chewing happy cheeks with open mouth
+      mouthSVG = `
+        <ellipse cx="130" cy="156" rx="5" ry="4" fill="#E11D48" stroke="#1E1E24" stroke-width="2"/>
+      `;
+    } else {
+      // Sweet gentle anime smile
+      mouthSVG = `
+        <path d="M124,154 Q130,158 136,154" fill="none" stroke="#1E1E24" stroke-width="2.6" stroke-linecap="round"/>
+      `;
+    }
+
+    // 9. Front Hair with Soft Gradient Tips & Moon Clip (like Minty reference)
+    let frontHairSVG = "";
+    if (hairStyle === "fluffy_boy" || hairStyle === "parted_boy") {
+      frontHairSVG = `
+        <g class="anime-front-hair">
+          <path d="M60,102 C62,64 90,44 130,44 C170,44 198,64 200,102 C186,88 172,92 164,116 C158,94 142,92 134,112 C126,90 108,92 98,116 C90,92 74,88 60,102 Z"
+                fill="url(#hairGrad_${uid})" stroke="#1E1E24" stroke-width="3" stroke-linejoin="round"/>
+          <!-- Hair Gloss Highlight Arc -->
+          <path d="M84,72 Q130,64 176,72" fill="none" stroke="rgba(255,255,255,0.65)" stroke-width="4.5" stroke-linecap="round"/>
+        </g>
+      `;
+    } else {
+      // Anime Girl Fluffy Hair with Moon Clip (like Minty reference)
+      frontHairSVG = `
+        <g class="anime-front-hair">
+          <!-- Forehead Hair Base with Gradient Tips -->
+          <path d="M58,104 C60,58 92,42 130,42 C168,42 200,58 202,104 C192,86 182,90 174,116 C166,94 150,90 140,114 C132,92 118,90 108,116 C100,90 84,86 72,112 C66,96 60,94 58,104 Z"
+                fill="url(#hairGrad_${uid})" stroke="#1E1E24" stroke-width="3.2" stroke-linejoin="round"/>
+          <!-- Fluffy Side Locks Framing the Face -->
+          <path d="M56,106 C50,132 58,158 66,168 C64,152 64,130 70,112 Z" fill="url(#hairGrad_${uid})" stroke="#1E1E24" stroke-width="2.6"/>
+          <path d="M204,106 C210,132 202,158 194,168 C196,152 196,130 190,112 Z" fill="url(#hairGrad_${uid})" stroke="#1E1E24" stroke-width="2.6"/>
+          <!-- Hair Gloss Highlight Sheen Ring -->
+          <path d="M82,68 Q130,58 178,68" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="5" stroke-linecap="round"/>
+
+          <!-- Golden Crescent Moon Hairclip (from Minty reference!) -->
+          <g class="anime-moon-clip" transform="translate(162, 60)">
+            <path d="M0,0 C12,4 16,18 8,26 C2,32 -8,30 -12,22 C-2,20 4,14 0,0 Z" fill="#FBBF24" stroke="#1E1E24" stroke-width="2.2" filter="drop-shadow(0 2px 4px rgba(251,191,36,0.6))"/>
+          </g>
+        </g>
+      `;
+    }
+
+    // 10. Front Head Accessories
+    let frontAccSVG = "";
+    if (accessories.has("glasses_cool")) {
+      frontAccSVG += `
+        <g class="acc-glasses">
+          <rect x="80" y="122" width="40" height="26" rx="7" fill="rgba(15, 23, 42, 0.72)" stroke="#F8FAFC" stroke-width="2.4"/>
+          <rect x="140" y="122" width="40" height="26" rx="7" fill="rgba(15, 23, 42, 0.72)" stroke="#F8FAFC" stroke-width="2.4"/>
+          <line x1="120" y1="135" x2="140" y2="135" stroke="#F8FAFC" stroke-width="3"/>
+          <line x1="84" y1="126" x2="98" y2="142" stroke="rgba(255,255,255,0.5)" stroke-width="2" stroke-linecap="round"/>
+          <line x1="144" y1="126" x2="158" y2="142" stroke="rgba(255,255,255,0.5)" stroke-width="2" stroke-linecap="round"/>
+        </g>
+      `;
+    }
+    if (accessories.has("cat_ears")) {
+      frontAccSVG += `
+        <g class="acc-cat-ears">
+          <path d="M72,56 L54,16 L94,40 Z" fill="${hairColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <path d="M70,50 L58,22 L86,38 Z" fill="#FDA4AF"/>
+          <path d="M188,56 L206,16 L166,40 Z" fill="${hairColor}" stroke="#1E1E24" stroke-width="2.8" stroke-linejoin="round"/>
+          <path d="M190,50 L202,22 L174,38 Z" fill="#FDA4AF"/>
+        </g>
+      `;
+    }
+    if (accessories.has("bunny_ears")) {
+      frontAccSVG += `
+        <g class="acc-bunny-ears">
+          <ellipse cx="95" cy="30" rx="9" ry="26" transform="rotate(-12 95 30)" fill="#FFFFFF" stroke="#1E1E24" stroke-width="2.8"/>
+          <ellipse cx="95" cy="30" rx="4.5" ry="18" transform="rotate(-12 95 30)" fill="#FDA4AF"/>
+          <ellipse cx="165" cy="30" rx="9" ry="26" transform="rotate(12 165 30)" fill="#FFFFFF" stroke="#1E1E24" stroke-width="2.8"/>
+          <ellipse cx="165" cy="30" rx="4.5" ry="18" transform="rotate(12 165 30)" fill="#FDA4AF"/>
+        </g>
+      `;
+    }
+    if (accessories.has("head_bow")) {
+      frontAccSVG += `
+        <g class="acc-head-bow" transform="translate(130, 42)">
+          <path d="M0,0 C-22,-18 -34,6 -8,10 Z" fill="#FB7185" stroke="#1E1E24" stroke-width="2.5"/>
+          <path d="M0,0 C22,-18 34,6 8,10 Z" fill="#FB7185" stroke="#1E1E24" stroke-width="2.5"/>
+          <circle cx="0" cy="2" r="6" fill="#E11D48" stroke="#1E1E24" stroke-width="2.2"/>
+        </g>
+      `;
+    }
+    if (accessories.has("royal_crown")) {
+      frontAccSVG += `
+        <g class="acc-crown" transform="translate(106, 16)">
+          <polygon points="4,28 0,6 14,16 24,2 34,16 48,6 44,28" fill="#FACC15" stroke="#1E1E24" stroke-width="2.5" stroke-linejoin="round"/>
+          <circle cx="24" cy="19" r="3.5" fill="#E11D48"/>
+        </g>
+      `;
+    }
+    if (accessories.has("cheek_plaster")) {
+      frontAccSVG += `
+        <g class="acc-plaster" transform="translate(162, 144) rotate(-18)">
+          <rect x="-12" y="-5" width="24" height="10" rx="3" fill="#FEF08A" stroke="#CA8A04" stroke-width="1.8"/>
+          <circle cx="0" cy="0" r="2" fill="#E11D48"/>
+        </g>
+      `;
+    }
+    if (accessories.has("sprout_leaf")) {
+      frontAccSVG += `
+        <g class="acc-sprout" transform="translate(130, 42)">
+          <path d="M0,2 Q2,-14 0,-22" fill="none" stroke="#15803D" stroke-width="3" stroke-linecap="round"/>
+          <path d="M0,-20 C-16,-28 -18,-10 0,-12 Z" fill="#4ADE80" stroke="#15803D" stroke-width="2"/>
+          <path d="M0,-22 C16,-30 18,-12 0,-14 Z" fill="#22C55E" stroke="#15803D" stroke-width="2"/>
+        </g>
+      `;
+    }
+
+    return `
+      <defs>
+        <!-- Two-tone anime hair gradient (darker root to vibrant pastel tip) -->
+        <linearGradient id="hairGrad_${uid}" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="${hairColor}"/>
+          <stop offset="68%" stop-color="${hairColor}"/>
+          <stop offset="100%" stop-color="${hairColorTip}"/>
+        </linearGradient>
+      </defs>
+
+      <!-- Soft Ground Contact Shadow -->
+      <ellipse cx="130" cy="292" rx="54" ry="11" fill="rgba(30, 30, 36, 0.16)"/>
+
+      ${backAccSVG}
+      ${backHairSVG}
+
+      <!-- Body Group with breathing & affectionate sway -->
+      <g class="anime-body-group" transform="translate(${bodyShiftX}, ${bodyShiftY})">
+        <path d="M121,166 L121,180 L139,180 L139,166 Z" fill="${skin}" stroke="#1E1E24" stroke-width="2.8"/>
+        ${leftArmSVG}
+        ${rightArmSVG}
+        <path d="M106,178 C98,202 95,232 98,262 C100,278 104,288 112,290 L124,290 C126,274 126,256 130,256 C134,256 134,274 136,290 L148,290 C156,288 160,278 162,262 C165,232 162,202 154,178 Z" fill="${skin}" stroke="#1E1E24" stroke-width="2.8"/>
+        ${legWearSVG}
+        ${outfitSVG}
+        ${midAccSVG}
+      </g>
+
+      <!-- Animated Head & Face Group with Centered Transformation Pivot (130, 140) -->
+      <g class="anime-head-group" transform="translate(130, 140) rotate(${headTilt}) scale(${headSquishX}, ${headSquishY}) translate(-130, -140)">
+        ${headBaseSVG}
+        ${blushSVG}
+        ${eyesSVG}
+        ${browsSVG}
+        ${mouthSVG}
+        ${frontHairSVG}
+        ${frontAccSVG}
+      </g>
+    `;
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. 2D Animated Flame Spirit Pet (Огонёк любви)
+  // --------------------------------------------------------------------------
+  function buildFlamePetSVG(stageInfo, time = 0) {
+    const stage = stageInfo || {};
+    const tier = stage.tier || 1;
+    const color = stage.color || "#F59E0B";
+    const brightColor = "#FEF08A";
+    const flameBob = Math.sin(time * 3) * 6;
+    const flameWobble = Math.cos(time * 2.5) * 4;
+
+    return `
+      <g class="flame-pet" transform="translate(${flameWobble}, ${flameBob})">
+        <defs>
+          <radialGradient id="flameGrad" cx="50%" cy="60%" r="50%">
+            <stop offset="0%" stop-color="#FFFFFF"/>
+            <stop offset="35%" stop-color="${brightColor}"/>
+            <stop offset="70%" stop-color="${color}"/>
+            <stop offset="100%" stop-color="#EA580C"/>
+          </radialGradient>
+          <filter id="flameGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="6" result="blur"/>
+            <feMerge>
+              <feMergeNode in="blur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+
+        <!-- Outer Heat Aura -->
+        <circle cx="28" cy="28" r="26" fill="${color}" opacity="0.28" filter="url(#flameGlow)"/>
+
+        <!-- Flame Body -->
+        <path d="M28,6 C34,16 46,22 46,34 C46,44 38,50 28,50 C18,50 10,44 10,34 C10,22 22,16 28,6 Z"
+              fill="url(#flameGrad)" filter="url(#flameGlow)"/>
+
+        <!-- Inner Core -->
+        <path d="M28,18 C31,24 38,28 38,36 C38,42 33,45 28,45 C23,45 18,42 18,36 C18,28 25,24 28,18 Z"
+              fill="#FFFFFF" opacity="0.85"/>
+
+        <!-- Cute Eyes and Rosy Cheeks -->
+        <circle cx="23" cy="34" r="2.2" fill="#18181B"/>
+        <circle cx="33" cy="34" r="2.2" fill="#18181B"/>
+        <circle cx="24" cy="33.2" r="0.8" fill="#FFFFFF"/>
+        <circle cx="34" cy="33.2" r="0.8" fill="#FFFFFF"/>
+        <ellipse cx="20" cy="37" rx="2" ry="1.2" fill="#FDA4AF"/>
+        <ellipse cx="36" cy="37" rx="2" ry="1.2" fill="#FDA4AF"/>
+        <path d="M26,37 Q28,39 30,37" fill="none" stroke="#18181B" stroke-width="1.2" stroke-linecap="round"/>
+
+        <!-- Crown / Aura for high tiers -->
+        ${tier >= 3 ? `<polygon points="22,10 28,4 34,10 32,14 24,14" fill="#FACC15" stroke="#CA8A04" stroke-width="1"/>` : ""}
+        ${tier >= 5 ? `<path d="M8,30 C0,22 2,14 10,20 Z M48,30 C56,22 54,14 46,20 Z" fill="rgba(255,255,255,0.85)" stroke="#F59E0B" stroke-width="1.2"/>` : ""}
+      </g>
+    `;
+  }
+
+  // --------------------------------------------------------------------------
+  // 3. Autonomous Animation Controller & Interactive Scene Instance
+  // --------------------------------------------------------------------------
+  class ChibiSceneInstance {
+    constructor(container, options) {
+      this.container = container;
+      this.options = options || {};
+      this.mode = options.mode || "solo";
+      this.canPet = Boolean(options.canPet);
+
+      // State tracking
+      this.time = 0;
+      this.isRunning = true;
+      this.blinkTimer = 0;
+      this.blinkProgress = 0;
+      this.nextBlinkTime = 3.0;
+      this.lookX = 0;
+      this.lookY = 0;
+      this.lookTimer = 0;
+      this.nextLookTime = 4.0;
+      this.idleActionTimer = 0;
+      this.nextIdleActionTime = 8.0;
+      this.currentAction = "idle";
+      this.actionEndTime = 0;
+
+      // Finger Petting physics & escalating 3-tier phrases
+      this.isPetting = false;
+      this.petStrokeAccum = 0;
+      this.petLevel = 0;
+      this.petFollowX = 0;
+      this.petFollowY = 0;
+      this.lastPhraseTier = 0;
+      this.petNotifiedCare = false;
+      this.lastTouchX = 0;
+      this.lastTouchY = 0;
+      this.petLastParticleTime = 0;
+      this.petLastHaptic = 0;
+      this.bubbleHideTimer = null;
+
+      // Action animations (feeding, shower, sleep)
+      this.careEffect = null;
+      this.careEffectEnd = 0;
+
+      this.initDOM();
+      this.initEvents();
+      this.animate = this.animate.bind(this);
+      this.rafId = requestAnimationFrame(this.animate);
+    }
+
+    initDOM() {
+      this.container.innerHTML = "";
+      this.wrapper = document.createElement("div");
+      this.wrapper.className = "chibi-anime-wrapper";
+      this.wrapper.style.cssText = "position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden;";
+
+      // Petting heart effects container
+      this.fxContainer = document.createElement("div");
+      this.fxContainer.className = "chibi-pet-fx-layer";
+      this.fxContainer.style.cssText = "position:absolute; inset:0; pointer-events:none; z-index:20;";
+
+      this.svgContainer = document.createElement("div");
+      this.svgContainer.className = "chibi-svg-holder";
+      this.svgContainer.style.cssText = "width:100%; height:100%; display:flex; align-items:center; justify-content:center;";
+
+      // Dedicated Pop-in Speech Bubble
+      this.speechBubble = document.createElement("div");
+      this.speechBubble.className = "chibi-pet-speech-bubble";
+
+      this.wrapper.appendChild(this.svgContainer);
+      this.wrapper.appendChild(this.fxContainer);
+      this.wrapper.appendChild(this.speechBubble);
+      this.container.appendChild(this.wrapper);
+    }
+
+    getCoords(e) {
+      const rect = this.wrapper.getBoundingClientRect();
+      let cx = e.clientX;
+      let cy = e.clientY;
+      if (e.touches && e.touches[0]) {
+        cx = e.touches[0].clientX;
+        cy = e.touches[0].clientY;
+      } else if (e.changedTouches && e.changedTouches[0]) {
+        cx = e.changedTouches[0].clientX;
+        cy = e.changedTouches[0].clientY;
+      }
+      return {
+        x: (cx != null ? cx : 0) - rect.left,
+        y: (cy != null ? cy : 0) - rect.top,
+        width: rect.width || 300,
+        height: rect.height || 300,
+      };
+    }
+
+    updatePetFollow(pt) {
+      const normX = (pt.x - pt.width * 0.5) / (pt.width * 0.35);
+      const normY = (pt.y - pt.height * 0.45) / (pt.height * 0.35);
+      this.petFollowX = Math.max(-1, Math.min(1, normX));
+      this.petFollowY = Math.max(-1, Math.min(1, normY));
+    }
+
+    initEvents() {
+      if (!this.canPet) return;
+
+      const onStart = (e) => {
+        this.isPetting = true;
+        const pt = this.getCoords(e);
+        this.lastTouchX = pt.x;
+        this.lastTouchY = pt.y;
+        this.petStrokeAccum = Math.max(this.petStrokeAccum, 0.16);
+        this.updatePetFollow(pt);
+        this.spawnHeart(pt);
+        haptic("light");
+      };
+
+      const onMove = (e) => {
+        if (!this.isPetting) return;
+        const pt = this.getCoords(e);
+        const dx = pt.x - this.lastTouchX;
+        const dy = pt.y - this.lastTouchY;
+        this.lastTouchX = pt.x;
+        this.lastTouchY = pt.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > 0.4) {
+          // Accumulate loving stroke energy as finger rubs across the avatar!
+          this.petStrokeAccum = Math.min(1.2, this.petStrokeAccum + dist * 0.0075);
+          this.updatePetFollow(pt);
+
+          const now = performance.now();
+          if (now - this.petLastParticleTime > 90) {
+            this.petLastParticleTime = now;
+            this.spawnHeart(pt, this.petStrokeAccum > 0.7);
+          }
+
+          if (now - this.petLastHaptic > 180) {
+            haptic(this.petStrokeAccum > 0.7 ? "medium" : "light");
+            this.petLastHaptic = now;
+          }
+
+          // Escalating Special Emotion Speech Bubbles & Care Persistence!
+          if (this.petStrokeAccum > 0.82 && this.lastPhraseTier < 3) {
+            this.lastPhraseTier = 3;
+            haptic("medium");
+            this.showBubble(PET_PHRASES_T3[Math.floor(Math.random() * PET_PHRASES_T3.length)]);
+            if (!this.petNotifiedCare) {
+              this.petNotifiedCare = true;
+              if (typeof window.onPartner3DPetted === "function") {
+                window.onPartner3DPetted();
+              }
+            }
+          } else if (this.petStrokeAccum > 0.46 && this.lastPhraseTier < 2) {
+            this.lastPhraseTier = 2;
+            haptic("light");
+            this.showBubble(PET_PHRASES_T2[Math.floor(Math.random() * PET_PHRASES_T2.length)]);
+          } else if (this.petStrokeAccum > 0.18 && this.lastPhraseTier < 1) {
+            this.lastPhraseTier = 1;
+            this.showBubble(PET_PHRASES_T1[Math.floor(Math.random() * PET_PHRASES_T1.length)]);
+          }
+        }
+      };
+
+      const onEnd = () => {
+        this.isPetting = false;
+        this.lastPhraseTier = 0;
+        this.petNotifiedCare = false;
+      };
+
+      this.wrapper.addEventListener("touchstart", onStart, { passive: true });
+      this.wrapper.addEventListener("touchmove", onMove, { passive: true });
+      this.wrapper.addEventListener("touchend", onEnd, { passive: true });
+      this.wrapper.addEventListener("mousedown", onStart);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onEnd);
+    }
+
+    spawnHeart(pt, isBig = false) {
+      if (!this.fxContainer) return;
+      const heart = document.createElement("span");
+      heart.className = "fx-pet-heart";
+      const icons = isBig ? ["💖", "💝", "✨", "💕", "🌸", "⭐", "🥰"] : ["💕", "✨", "🌸", "⭐"];
+      heart.textContent = icons[Math.floor(Math.random() * icons.length)];
+      const driftX = (Math.random() - 0.5) * 60;
+      const driftRot = (Math.random() - 0.5) * 45;
+      const size = isBig ? (22 + Math.random() * 12) : (16 + Math.random() * 10);
+      heart.style.cssText = `
+        position: absolute;
+        left: ${pt.x}px;
+        top: ${pt.y}px;
+        font-size: ${size}px;
+        pointer-events: none;
+        user-select: none;
+        z-index: 30;
+        transform: translate(-50%, -50%);
+        animation: floatUpFade 1.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        --drift-x: ${driftX}px;
+        --drift-rot: ${driftRot}deg;
+      `;
+      this.fxContainer.appendChild(heart);
+      setTimeout(() => heart.remove(), 1200);
+    }
+
+    showBubble(text) {
+      if (!this.speechBubble) return;
+      this.speechBubble.textContent = text;
+      this.speechBubble.classList.remove("active");
+      void this.speechBubble.offsetWidth;
+      this.speechBubble.classList.add("active");
+
+      clearTimeout(this.bubbleHideTimer);
+      this.bubbleHideTimer = setTimeout(() => {
+        if (this.speechBubble) {
+          this.speechBubble.classList.remove("active");
+        }
+      }, 2300);
+    }
+
+    update(opts) {
+      this.options = Object.assign(this.options, opts || {});
+      this.mode = this.options.mode || "solo";
+      this.canPet = Boolean(this.options.canPet);
+    }
+
+    playCareAction(action, itemId) {
+      this.careEffect = { action, itemId };
+      this.careEffectEnd = this.time + 2.5;
+      this.currentAction = action === "feed" ? "eat" : "giggle";
+      this.actionEndTime = this.time + 2.0;
+
+      if (action === "feed") {
+        this.showBubble("Ням-ням! 🍰✨");
+        haptic("medium");
+      } else if (action === "shower") {
+        this.showBubble("Сияет чистотой! 🫧✨");
+        haptic("medium");
+      }
+    }
+
+    playWithPet() {
+      this.showBubble("Огонёк прыгает от счастья! 🔥✨");
+      haptic("medium");
+    }
+
+    animate() {
+      if (!this.isRunning) return;
+      this.time += 0.016;
+      const dt = 0.016;
+
+      // 1. Blinking Logic
+      this.blinkTimer += 0.016;
+      if (this.blinkTimer >= this.nextBlinkTime) {
+        this.blinkProgress = Math.sin((this.blinkTimer - this.nextBlinkTime) * Math.PI * 6.5);
+        if (this.blinkProgress < 0) {
+          this.blinkProgress = 0;
+          this.blinkTimer = 0;
+          this.nextBlinkTime = 2.5 + Math.random() * 3.5;
+        }
+      }
+
+      // 2. Autonomous Eye Tracking (Looking Around)
+      this.lookTimer += 0.016;
+      if (this.lookTimer >= this.nextLookTime) {
+        this.lookTimer = 0;
+        this.nextLookTime = 3.5 + Math.random() * 4.0;
+        const targets = [
+          { x: 0, y: 0 },
+          { x: 0.8, y: -0.2 },
+          { x: -0.8, y: -0.2 },
+          { x: 0, y: 0.6 },
+          { x: 0, y: 0 },
+        ];
+        const t = targets[Math.floor(Math.random() * targets.length)];
+        this.lookX = t.x;
+        this.lookY = t.y;
+      }
+
+      // 3. Autonomous Idle Actions (Giggle, Wave, Dance)
+      this.idleActionTimer += 0.016;
+      if (this.idleActionTimer >= this.nextIdleActionTime) {
+        this.idleActionTimer = 0;
+        this.nextIdleActionTime = 8.0 + Math.random() * 7.0;
+        const actions = ["wave", "giggle", "idle", "idle"];
+        this.currentAction = actions[Math.floor(Math.random() * actions.length)];
+        this.actionEndTime = this.time + 2.2;
+      }
+      if (this.time > this.actionEndTime && this.currentAction !== "idle") {
+        this.currentAction = "idle";
+      }
+
+      // 4. Smooth Decay of Finger Petting Stroke Physics
+      if (!this.isPetting) {
+        this.petStrokeAccum = Math.max(0, this.petStrokeAccum - dt * 0.45);
+        this.petFollowX *= Math.pow(0.06, dt);
+        this.petFollowY *= Math.pow(0.06, dt);
+      }
+      this.petLevel += (Math.min(1, this.petStrokeAccum) - this.petLevel) * Math.min(1, dt * 10.0);
+
+      // Render Scene
+      this.render();
+      this.rafId = requestAnimationFrame(this.animate);
+    }
+
+    render() {
+      if (this.mode === "couple") {
+        this.renderCouple();
+      } else {
+        this.renderSolo();
+      }
+    }
+
+    renderSolo() {
+      const avatar = this.options.avatar || {};
+      const accessories = this.options.accessories || [];
+      const care = this.options.care || {};
+      const mood = this.options.mood || null;
+
+      const svgContent = buildAnimeChibiSVG(avatar, {
+        accessories,
+        care,
+        mood,
+        petLevel: this.petLevel,
+        petFollowX: this.petFollowX,
+        petFollowY: this.petFollowY,
+        isPetted: this.isPetting || this.petLevel > 0.12,
+        blink: this.blinkProgress,
+        lookX: this.lookX,
+        lookY: this.lookY,
+        currentAction: this.currentAction,
+        time: this.time,
+        careEffect: this.careEffect,
+        uid: "solo_model",
+      });
+
+      this.svgContainer.innerHTML = `
+        <svg viewBox="0 0 260 315" class="anime-chibi-svg" style="width:100%; height:100%; max-height:380px; overflow:visible;">
+          ${svgContent}
+        </svg>
+      `;
+    }
+
+    renderCouple() {
+      const user = this.options.user || {};
+      const partner = this.options.partner || {};
+      const pose = this.options.pose || "hug";
+      const partnerLeft = Boolean(this.options.partnerLeft);
+      const flameStage = (partner.care && partner.care.flameStage) || { tier: 1 };
+
+      // Kanna-style synchronized dance bounce!
+      let bounceA = Math.sin(this.time * 4) * 5;
+      let bounceB = Math.sin(this.time * 4 + (pose === "dance" ? 0 : 0.8)) * 5;
+      let tiltA = 0;
+      let tiltB = 0;
+      let txA = 35;
+      let txB = 195;
+      let armA = "normal";
+      let armB = "normal";
+
+      if (pose === "hug") {
+        txA = 52;
+        txB = 178;
+        armA = "open_hug";
+        armB = "open_hug";
+        tiltA = 3;
+        tiltB = -3;
+      } else if (pose === "hold_hands") {
+        txA = 42;
+        txB = 188;
+        armA = "hold_right";
+        armB = "hold_left";
+      } else if (pose === "pat_a_to_b") {
+        txA = 46;
+        txB = 184;
+        tiltB = 4;
+      } else if (pose === "pat_b_to_a") {
+        txA = 48;
+        txB = 184;
+        tiltA = 4;
+      } else if (pose === "dance") {
+        // Kanna Dance side-to-side rhythmic motion!
+        tiltA = Math.sin(this.time * 5) * 7;
+        tiltB = Math.sin(this.time * 5) * 7;
+        bounceA = Math.abs(Math.sin(this.time * 5)) * 9;
+        bounceB = Math.abs(Math.sin(this.time * 5)) * 9;
+        armA = "open_hug";
+        armB = "open_hug";
+      } else if (pose === "sleep_together") {
+        txA = 54;
+        txB = 176;
+      }
+
+      const svgA = buildAnimeChibiSVG(user.avatar, {
+        accessories: user.partnerAccessories || [],
+        mood: user.mood || "happy",
+        armPose: armA,
+        headTilt: tiltA,
+        blink: this.blinkProgress,
+        lookX: 0.5,
+        lookY: 0,
+        time: this.time,
+        currentAction: pose === "dance" ? "dance" : this.currentAction,
+        uid: "couple_user",
+      });
+
+      const svgB = partnerLeft
+        ? `
+          <g transform="translate(130, 150) opacity(0.35)">
+            <text x="0" y="0" font-size="44" text-anchor="middle">💔</text>
+            <text x="0" y="30" font-size="12" font-weight="800" fill="#9CA3AF" text-anchor="middle">Партнёр ушёл</text>
+          </g>
+        `
+        : buildAnimeChibiSVG(partner.avatar, {
+            accessories: partner.partnerAccessories || [],
+            mood: partner.mood || "happy",
+            care: partner.care,
+            armPose: armB,
+            headTilt: tiltB,
+            blink: this.blinkProgress,
+            lookX: -0.5,
+            lookY: 0,
+            time: this.time + 0.8,
+            currentAction: pose === "dance" ? "dance" : this.currentAction,
+            uid: "couple_partner",
+          });
+
+      // Animated Flame Pet Orbiting Between Couple
+      const petX = 215 + Math.sin(this.time * 1.8) * 45;
+      const petY = 80 + Math.cos(this.time * 2.2) * 22;
+      const petSVG = buildFlamePetSVG(flameStage, this.time);
+
+      this.svgContainer.innerHTML = `
+        <svg viewBox="0 0 490 330" class="couple-anime-svg" style="width:100%; height:100%; max-height:360px; overflow:visible;">
+          <!-- Cozy Ground Stage -->
+          <ellipse cx="245" cy="296" rx="195" ry="28" fill="rgba(255, 255, 255, 0.68)" stroke="rgba(255, 255, 255, 0.96)" stroke-width="4"/>
+
+          <!-- User Chibi -->
+          <g transform="translate(${txA}, ${bounceA})">
+            ${svgA}
+          </g>
+
+          <!-- Partner Chibi -->
+          <g transform="translate(${txB}, ${bounceB})">
+            ${svgB}
+          </g>
+
+          <!-- 2D Animated Flame Spirit Pet -->
+          <g transform="translate(${petX}, ${petY}) scale(0.9)" onclick="window.Chibi2D && window.Chibi2D.playWithPet()" style="cursor:pointer;">
+            ${petSVG}
+          </g>
+
+          ${pose === "dance" ? `
+            <text x="245" y="42" font-size="20" text-anchor="middle" fill="#F43F5E" class="dance-music-notes">🎵 🎶 💃🕺 🎶 🎵</text>
+          ` : ""}
+        </svg>
+      `;
+    }
+
+    destroy() {
+      this.isRunning = false;
+      if (this.rafId) cancelAnimationFrame(this.rafId);
+      this.container.innerHTML = "";
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 4. Global Manager API
+  // --------------------------------------------------------------------------
+  let activeScene = null;
+
+  window.Chibi2D = {
+    mount(container, options = {}) {
+      if (!container) return;
+      if (activeScene) {
+        if (activeScene.container === container) {
+          activeScene.update(options);
+          return activeScene;
+        }
+        activeScene.destroy();
+      }
+      activeScene = new ChibiSceneInstance(container, options);
+      return activeScene;
+    },
+
+    playCareAction(action, itemId) {
+      if (activeScene) {
+        activeScene.playCareAction(action, itemId);
+      }
+    },
+
+    playWithPet() {
+      if (activeScene) {
+        activeScene.playWithPet();
+      }
+    },
+  };
+
+  // 100% Backward compatibility alias so app.js requires 0 breaking changes!
+  window.Chibi3D = window.Chibi2D;
+
+  console.log("🌸 Chibi2D Anime Engine v3 ready! (VTuber Live2D quality)");
+})();

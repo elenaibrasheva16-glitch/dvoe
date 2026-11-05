@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+backend/tunnel_url.txt
+backend/*.log

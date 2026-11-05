@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="bgGradPartner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EDE9FE" />
+      <stop offset="50%" stop-color="#DDD6FE" />
+      <stop offset="100%" stop-color="#C4B5FD" />
+    </linearGradient>
+    <linearGradient id="glowGradPartner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6" />
+      <stop offset="100%" stop-color="#EC4899" />
+    </linearGradient>
+  </defs>
+  <!-- Background 1:1 squircle -->
+  <rect width="400" height="400" rx="90" fill="url(#bgGradPartner)" />
+  
+  <!-- Subtle decorative rings -->
+  <circle cx="200" cy="200" r="140" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2" />
+  
+  <!-- Stylized minimalist head -->
+  <circle cx="200" cy="155" r="58" fill="#FFFFFF" fill-opacity="0.9" />
+  
+  <!-- Stylized minimalist shoulders/bust -->
+  <path d="M110 315 C110 240, 150 220, 200 220 C250 220, 290 240, 290 315 Z" fill="#FFFFFF" fill-opacity="0.9" />
+  
+  <!-- Tiny heart accent -->
+  <path d="M200 135 C197 130, 190 130, 187 135 C184 140, 192 147, 200 153 C208 147, 216 140, 213 135 C210 130, 203 130, 200 135 Z" fill="url(#glowGradPartner)" opacity="0.85" />
+</svg>

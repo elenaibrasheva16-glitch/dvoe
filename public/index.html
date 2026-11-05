@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Двое — Время вместе и настроение</title>
+  
+  <!-- Telegram WebApp SDK -->
+  <script src="/js/telegram-web-app.js"></script>
+  
+  <!-- Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
+  
+  <link rel="stylesheet" href="/css/styles.css?v=200" />
+</head>
+<body class="theme-light">
+  <div id="app" class="app-container">
+    
+    <!-- Top App Bar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="16" r="9" stroke="url(#brandGrad)" stroke-width="2.5" />
+            <circle cx="20" cy="16" r="9" stroke="url(#brandGrad)" stroke-width="2.5" />
+            <path d="M16 12C14.5 10 12.5 10.5 12 12C11 14.5 16 19 16 19C16 19 21 14.5 20 12C19.5 10.5 17.5 10 16 12Z" fill="url(#brandGrad)" />
+            <defs>
+              <linearGradient id="brandGrad" x1="3" y1="7" x2="29" y2="25" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#FF6B81" />
+                <stop offset="1" stop-color="#FFA07A" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">Двое</span>
+          <span class="brand-subtitle" id="couple-status-text">Вместе</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-refresh" class="icon-btn" aria-label="Обновить">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="app-main">
+      
+      <!-- ============================================================ -->
+      <!-- TAB 1: ГЛАВНАЯ (Home) -->
+      <!-- ============================================================ -->
+      <section id="tab-home" class="tab-pane active">
+        
+        <!-- Couple Cards (1:1 Photos & Moods) -->
+        <div class="couple-stage">
+          
+          <!-- Partner 1: You -->
+          <div class="partner-card me-card">
+            <!-- Mood above photo -->
+            <div class="mood-anchor" id="user-mood-anchor" title="Нажмите, чтобы изменить своё настроение">
+              <div class="mood-pill user-mood" id="user-mood-pill">
+                <span class="mood-emoji" id="user-mood-emoji">🥰</span>
+                <span class="mood-label" id="user-mood-label">Люблю</span>
+              </div>
+            </div>
+            
+            <!-- 1:1 Photo Frame -->
+            <div class="avatar-frame-1x1" id="user-photo-frame">
+              <img id="user-photo" src="/img/avatar_me.svg" alt="Моё фото" class="avatar-img" />
+              <div class="active-dot" id="user-active-dot"></div>
+            </div>
+            
+            <div class="partner-meta">
+              <span class="partner-name" id="user-display-name">Вы</span>
+              <span class="partner-handle" id="user-handle">@you</span>
+            </div>
+          </div>
+
+          <!-- Connection Center -->
+          <div class="connection-center">
+            <div class="heart-pulse-box" id="heart-connection-btn" title="Послать любовь">
+              <svg class="heart-icon" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+              </svg>
+            </div>
+            <div class="connection-badge" id="days-summary-badge">
+              <span id="days-total-num">0</span> дн.
+            </div>
+          </div>
+
+          <!-- Partner 2: Partner -->
+          <div class="partner-card partner-slot-card" id="partner-card-slot">
+            <!-- Mood above photo (Clickable -> Opens Explanation Modal!) -->
+            <div class="mood-anchor" id="partner-mood-anchor" title="Нажмите, чтобы увидеть пояснение к настроению">
+              <div class="mood-pill partner-mood" id="partner-mood-pill">
+                <span class="mood-emoji" id="partner-mood-emoji">🥰</span>
+                <span class="mood-label" id="partner-mood-label">Люблю</span>
+                <span class="mood-hint-dot"></span>
+              </div>
+            </div>
+
+            <!-- 1:1 Photo Frame or Invite Slot -->
+            <div class="avatar-frame-1x1" id="partner-photo-frame">
+              <img id="partner-photo" src="/img/avatar_partner.svg" alt="Фото партнёра" class="avatar-img" />
+              <div class="active-dot" id="partner-active-dot"></div>
+              
+              <!-- Empty Slot Overlay (When not paired) -->
+              <div class="empty-partner-overlay hidden" id="empty-partner-overlay">
+                <div class="empty-icon">+</div>
+                <span>Партнёр</span>
+              </div>
+            </div>
+
+            <div class="partner-meta">
+              <span class="partner-name" id="partner-display-name">Партнёр</span>
+              <span class="partner-handle" id="partner-handle">@partner</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Relationship Time Counter Card -->
+        <div class="card counter-card hidden" id="counter-card">
+          <div class="card-header-minimal">
+            <span class="card-eyebrow">Мы вместе уже</span>
+            <span class="anniversary-date-display" id="anniversary-label">с 14 февраля 2024</span>
+          </div>
+
+          <!-- 6-Unit Live Timer Grid -->
+          <div class="timer-grid">
+            <div class="timer-unit">
+              <div class="timer-num" id="t-years">0</div>
+              <div class="timer-label" id="lbl-years">Лет</div>
+            </div>
+            <div class="timer-unit">
+              <div class="timer-num" id="t-months">0</div>
+              <div class="timer-label" id="lbl-months">Месяцев</div>
+            </div>
+            <div class="timer-unit">
+              <div class="timer-num" id="t-days">0</div>
+              <div class="timer-label" id="lbl-days">Дней</div>
+            </div>
+            <div class="timer-unit">
+              <div class="timer-num" id="t-hours">00</div>
+              <div class="timer-label">Часов</div>
+            </div>
+            <div class="timer-unit">
+              <div class="timer-num" id="t-minutes">00</div>
+              <div class="timer-label">Минут</div>
+            </div>
+            <div class="timer-unit">
+              <div class="timer-num timer-sec-highlight" id="t-seconds">00</div>
+              <div class="timer-label">Секунд</div>
+            </div>
+          </div>
+
+          <!-- Total days & Milestone banner -->
+          <div class="counter-footer">
+            <div class="milestone-text" id="milestone-text">
+              ✨ Загружаем прекрасные моменты...
+            </div>
+          </div>
+        </div>
+
+        <!-- Single / Not Paired Invite Box -->
+        <div class="card invite-box-card hidden" id="invite-box-card">
+          <div class="invite-header">
+            <div class="invite-header-icon" style="font-size: 32px; margin-bottom: 8px;">💕</div>
+            <h3>Подключите партнёра, чтобы запустить отсчёт времени вместе 💕</h3>
+            <p>Отсчёт времени ваших отношений вплоть до секунд начнётся сразу же, как только вы свяжете профили.</p>
+          </div>
+          <div class="invite-code-row clickable-code-box" id="home-code-box" title="Нажмите, чтобы скопировать">
+            <span class="invite-code-display" id="home-invite-code">PAIR-XXXXXX</span>
+            <button class="btn-secondary btn-sm" id="btn-copy-code">📋 Скопировать</button>
+          </div>
+          <div class="invite-actions-col" style="display: flex; flex-direction: column; gap: 10px;">
+            <button class="btn-primary btn-block" id="btn-share-telegram">
+              💌 Отправить приглашение в Telegram
+            </button>
+            <button class="btn-secondary btn-block" id="btn-enter-partner-code">
+              🔗 Ввести код партнёра
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Mood Note Preview Box (if partner has note) -->
+        <div class="card partner-note-card hidden" id="partner-note-card" role="button" tabindex="0" title="Нажмите, чтобы увидеть подробное пояснение">
+          <div class="partner-note-header">
+            <span class="note-avatar-mini" id="note-mini-emoji">💭</span>
+            <span class="note-author" id="note-card-author">Настроение партнёра</span>
+            <span class="note-time" id="note-card-time">только что</span>
+          </div>
+          <div class="partner-note-body" id="partner-note-quote">
+            «...»
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- TAB 2: НАСТРОЙКИ (Settings) -->
+      <!-- ============================================================ -->
+      <section id="tab-settings" class="tab-pane">
+        
+        <div class="settings-container">
+          
+          <!-- 1. Display Name -->
+          <div class="card settings-card">
+            <div class="card-title">Ваше имя</div>
+            <div class="form-group">
+              <label for="input-display-name" class="input-label">Имя, которое видит ваш партнёр</label>
+              <input type="text" id="input-display-name" class="input-text-custom" placeholder="Введите ваше имя" maxlength="40" />
+            </div>
+            <button class="btn-primary btn-block" id="btn-save-name">
+              Сохранить имя
+            </button>
+            <p class="settings-hint">Имя сразу обновится на главном экране и у вашей второй половинки.</p>
+          </div>
+
+          <!-- 2. Profile & 1:1 Photo -->
+          <div class="card settings-card">
+            <div class="card-title">Ваше фото 1:1</div>
+            <div class="photo-settings-row">
+              <div class="avatar-frame-1x1 preview-1x1">
+                <img id="settings-preview-photo" src="/img/avatar_me.svg" alt="Превью 1:1" class="avatar-img" />
+              </div>
+              <div class="photo-actions">
+                <label class="btn-primary btn-sm file-upload-btn">
+                  <span>Выбрать новое фото</span>
+                  <input type="file" id="file-photo-input" accept="image/*" class="hidden-file-input" />
+                </label>
+                <button class="btn-secondary btn-sm" id="btn-sync-tg-photo">
+                  Взять фото из Telegram
+                </button>
+                <button class="btn-subtle btn-sm" id="btn-reset-photo">
+                  Сбросить фото
+                </button>
+              </div>
+            </div>
+            <p class="settings-hint">Фото автоматически центрируется и масштабируется в пропорции 1:1.</p>
+          </div>
+
+          <!-- 2. Set Mood & Explanation -->
+          <div class="card settings-card">
+            <div class="card-title">Ваше настроение</div>
+            
+            <div class="mood-selector-grid" id="mood-selector-grid">
+              <!-- Dynamically populated mood buttons -->
+            </div>
+
+            <div class="form-group">
+              <label for="input-mood-reason" class="input-label">
+                Пояснение к настроению
+                <span class="label-optional">(партнёр увидит при нажатии)</span>
+              </label>
+              <textarea id="input-mood-reason" class="text-area-custom" rows="3" placeholder="Почему у вас такое настроение? Расскажите партнёру, чем вы заняты или о чём думаете..."></textarea>
+            </div>
+
+            <button class="btn-primary btn-block" id="btn-save-mood">
+              Сохранить настроение
+            </button>
+          </div>
+
+          <!-- 3. Relationship Start Date -->
+          <div class="card settings-card">
+            <div class="card-title">Дата начала отношений</div>
+            <div class="form-group">
+              <label for="input-relationship-date" class="input-label">Выберите дату вашей первой встречи или годовщины</label>
+              <input type="date" id="input-relationship-date" class="input-date-custom" />
+            </div>
+            <button class="btn-secondary btn-block" id="btn-save-date">
+              Сохранить дату отношений
+            </button>
+            <p class="settings-hint">Счётчик на главной синхронизируется у обоих партнёров.</p>
+          </div>
+
+          <!-- 4. Partner Management -->
+          <div class="card settings-card">
+            <div class="card-title">Партнёр и связь</div>
+            
+            <!-- Paired state view -->
+            <div id="settings-paired-view">
+              <div class="paired-partner-info">
+                <div class="avatar-frame-1x1 mini-1x1">
+                  <img id="settings-partner-photo" src="/img/avatar_partner.svg" alt="Партнёр" class="avatar-img" />
+                </div>
+                <div class="paired-meta">
+                  <span class="paired-name" id="settings-partner-name">Партнёр</span>
+                  <span class="paired-handle" id="settings-partner-handle">@handle</span>
+                  <span class="paired-status-tag">В паре с вами 💕</span>
+                </div>
+              </div>
+              <button class="btn-danger btn-block" id="btn-unlink-partner">
+                Отвязать партнёра
+              </button>
+            </div>
+
+            <!-- Single state view -->
+            <div id="settings-single-view" class="hidden">
+              <div class="form-group">
+                <label for="input-partner-code" class="input-label">Привязать партнёра по коду</label>
+                <div class="input-with-btn">
+                  <input type="text" id="input-partner-code" placeholder="Например: PAIR-1CAAF2" class="input-text-custom" />
+                  <button class="btn-primary btn-sm" id="btn-pair-by-code">Привязать</button>
+                </div>
+              </div>
+              <div class="single-code-reminder clickable-code-box" id="settings-code-box" title="Нажмите, чтобы скопировать">
+                <span>Ваш код: </span>
+                <strong id="settings-my-code">PAIR-XXXXXX</strong>
+                <span class="copy-icon-inline" title="Скопировать">📋</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 5. Support & Developer Contact -->
+          <div class="card settings-card">
+            <div class="card-title">Поддержка и связь с разработчиком</div>
+            <p class="settings-hint">Есть идея, пожелание, вопрос или предложение о сотрудничестве? Напишите нам напрямую.</p>
+            <button class="btn-secondary btn-block" id="btn-open-support">
+              💌 Написать разработчику
+            </button>
+          </div>
+
+          <!-- 6. Theme and App Info -->
+          <div class="card settings-card">
+            <div class="card-title">Тема оформления</div>
+            <div class="theme-switch-row">
+              <button class="btn-theme active" data-theme="light" id="btn-theme-light">☀️ Светлая</button>
+              <button class="btn-theme" data-theme="dark" id="btn-theme-dark">🌙 Тёмная</button>
+            </div>
+          </div>
+
+          <div class="app-version-footer">
+            <span>Двое • Версия 2.0</span>
+            <span>Создано с любовью</span>
+          </div>
+
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- Bottom Navigation Bar (Strictly 2 Tabs) -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" data-tab="tab-home" id="nav-btn-home">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          <polyline points="9 22 9 12 15 12 15 22"/>
+        </svg>
+        <span class="nav-label">Главная</span>
+      </button>
+
+      <button class="nav-item" data-tab="tab-settings" id="nav-btn-settings">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span class="nav-label">Настройки</span>
+      </button>
+    </nav>
+
+    <!-- ============================================================ -->
+    <!-- MODALS & BOTTOM SHEETS -->
+    <!-- ============================================================ -->
+
+    <!-- 1. Partner Mood Explanation Modal -->
+    <div class="modal-backdrop hidden" id="modal-partner-mood">
+      <div class="modal-sheet">
+        <div class="sheet-handle"></div>
+        <div class="modal-header">
+          <div class="sheet-avatar-wrap">
+            <img id="modal-partner-photo" src="/img/avatar_partner.svg" alt="Партнёр" class="sheet-avatar-1x1" />
+            <span class="sheet-mood-badge" id="modal-mood-emoji">🥰</span>
+          </div>
+          <div class="sheet-author-info">
+            <h3 id="modal-partner-title">Настроение партнёра</h3>
+            <span class="sheet-time" id="modal-mood-time">Обновлено недавно</span>
+          </div>
+          <button class="sheet-close-btn" id="btn-close-mood-modal">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="mood-highlight-box">
+            <span class="mood-big-emoji" id="modal-big-emoji">🥰</span>
+            <div class="mood-highlight-text">
+              <strong id="modal-mood-label">Люблю</strong>
+              <span>текущий статус</span>
+            </div>
+          </div>
+
+          <div class="explanation-box">
+            <div class="explanation-title">Пояснение:</div>
+            <div class="explanation-quote" id="modal-mood-reason">
+              «Партнёр ещё не оставил подробного пояснения к настроению.»
+            </div>
+          </div>
+
+          <div class="quick-reactions-title">Отправить быстрый знак внимания:</div>
+          <div class="quick-reactions-row">
+            <button class="btn-reaction" data-reaction="🤗" title="Обнять">🤗 Обнять</button>
+            <button class="btn-reaction" data-reaction="💋" title="Поцеловать">💋 Поцелуй</button>
+            <button class="btn-reaction" data-reaction="❤️" title="Люблю">❤️ Люблю</button>
+            <button class="btn-reaction" data-reaction="☕️" title="Забочусь">☕️ Забота</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Unlink Partner Confirmation Modal -->
+    <div class="modal-backdrop hidden" id="modal-unlink-confirm">
+      <div class="modal-dialog">
+        <div class="dialog-icon">💔</div>
+        <h3>Отвязать партнёра?</h3>
+        <p>Вы действительно хотите разорвать связь? Общий счётчик времени и синхронизация настроения будут сброшены.</p>
+        <div class="dialog-actions">
+          <button class="btn-danger btn-block" id="btn-confirm-unlink">Да, отвязать</button>
+          <button class="btn-secondary btn-block" id="btn-cancel-unlink">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Support & Feedback Modal -->
+    <div class="modal-backdrop hidden" id="modal-support">
+      <div class="modal-sheet">
+        <div class="sheet-handle"></div>
+        <div class="modal-header">
+          <h3>💌 Связь с разработчиком</h3>
+          <button class="sheet-close-btn" id="btn-close-support-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="settings-hint">Напишите нам о любых идеях, пожеланиях, ошибках или предложениях по сотрудничеству:</p>
+          
+          <div class="form-group">
+            <label class="input-label">Тип обращения</label>
+            <div class="category-tabs" id="support-category-tabs">
+              <button class="btn-cat active" data-cat="feedback">Пожелание</button>
+              <button class="btn-cat" data-cat="support">Поддержка</button>
+              <button class="btn-cat" data-cat="collaboration">Сотрудничество</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <textarea id="input-support-message" class="text-area-custom" rows="4" placeholder="Ваше сообщение..."></textarea>
+          </div>
+
+          <button class="btn-primary btn-block" id="btn-submit-support">
+            Отправить разработчику
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification Banner -->
+    <div id="toast" class="toast-notice"></div>
+
+  </div>
+
+  <script src="/js/app.js?v=200"></script>
+</body>
+</html>
