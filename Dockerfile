@@ -3,6 +3,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-ENV PORT=8085
-EXPOSE 8085
+ENV PORT=7860
+EXPOSE 7860
 CMD ["python", "backend/server.py"]

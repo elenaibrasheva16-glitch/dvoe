@@ -208,6 +208,8 @@ def get_current_webapp_url() -> str:
     env_url = (os.environ.get("WEBAPP_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
     if env_url.startswith("https://"):
         return env_url
+    if os.environ.get("SPACE_HOST"):
+        return f"https://{os.environ['SPACE_HOST']}"
     if os.path.exists(TUNNEL_URL_FILE):
         try:
             with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
