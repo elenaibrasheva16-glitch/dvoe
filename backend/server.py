@@ -1899,6 +1899,32 @@ def telegram_polling_worker():
                             tg_send_message(chat_id, "\n".join(msg_lines), uname=uname)
                         continue
 
+                    # 3d2. Admin Command: /stats or /adminstats (Overall bot user base & pairs)
+                    if text in ("/stats", "/adminstats", "статистика", "пользователи") or text.startswith("/stats"):
+                        if tg_id != ADMIN_TG_ID:
+                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                            continue
+                        with db_lock:
+                            conn = get_db()
+                            cur = conn.cursor()
+                            total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
+                            paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
+                            active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
+                            promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
+                            conn.close()
+
+                        total_pairs = paired_users // 2
+                        stats_msg = (
+                            f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
+                            f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
+                            f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
+                            f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
+                            f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>\n\n"
+                            f"<i>Детальную статистику по конкретным каналам смотрите через команду /vpstats</i>"
+                        )
+                        tg_send_message(chat_id, stats_msg, uname=uname)
+                        continue
+
                     # 3e. Command: /vp (Mutual PR / Cross-Promo portal)
                     if text in ("/vp", "вп", "🤝 взаимный пиар", "🤝 сотрудничество и вп", "🤝 сотрудничество", "сотрудничество", "/promo") or text.lower() in ("🤝 сотрудничество и вп", "🤝 взаимный пиар", "сотрудничество и вп") or text.startswith("/vp"):
                         vp_code_arg = text[len("/vp"):].strip() if text.startswith("/vp") else ""
