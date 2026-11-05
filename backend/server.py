@@ -311,7 +311,7 @@ def tg_api_call(method: str, payload: dict):
         }
     for attempt in range(2):
         try:
-            curr_proxies = proxies
+            curr_proxies = proxies if attempt == 0 else None
             resp = _tg_session.post(url, json=payload, proxies=curr_proxies, timeout=call_timeout)
             return resp.json()
         except Exception as e:
