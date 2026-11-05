@@ -114,16 +114,16 @@ class TestVpPromoSystem(unittest.TestCase):
         text_a = get_promo_creative_text("test_channel", "a")
         self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text_a)
         self.assertIn("«двое»", text_a.lower())
-        self.assertIn("счётчик отношений", text_a.lower())
+        self.assertIn("счётчик любви", text_a.lower())
         # Ensure zero raw HTML tags so copied text doesn't show broken markup in Telegram
         self.assertNotIn("<b>", text_a)
         self.assertNotIn("<i>", text_a)
 
-        # 2. Variant B (viral / mood drama & 'Обиделась')
+        # 2. Variant B (emotional sync)
         text_b = get_promo_creative_text("test_channel", "b")
         self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text_b)
         self.assertIn("«Двое»", text_b)
-        self.assertIn("Обиделась", text_b)
+        self.assertIn("синхронизация настроения", text_b)
         self.assertNotIn("<b>", text_b)
         self.assertNotIn("<i>", text_b)
 
@@ -141,21 +141,32 @@ class TestVpPromoSystem(unittest.TestCase):
                 self.assertNotIn(forbidden, txt.lower())
 
     def test_06_http_api_endpoints(self):
-        # Register an active test partner
-        add_or_update_promo_channel("@test_live_partner", "Партнёр Тест", "Уютный тестовый канал", custom_code="test_live_partner")
+        import threading
+        from backend.server import ThreadingHTTPServer, DvoeHTTPHandler
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), DvoeHTTPHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            url_base = f"http://127.0.0.1:{port}"
+            # Register an active test partner
+            add_or_update_promo_channel("@test_live_partner", "Партнёр Тест", "Уютный тестовый канал", custom_code="test_live_partner")
 
-        # 1. /api/promo_partner
-        r = requests.get(f"{SERVER_URL}/api/promo_partner", timeout=5)
-        self.assertEqual(r.status_code, 200)
-        data = r.json()
-        self.assertTrue(data.get("ok"))
-        self.assertIsNotNone(data.get("partner"))
+            # 1. /api/promo_partner
+            r = requests.get(f"{url_base}/api/promo_partner", timeout=5)
+            self.assertEqual(r.status_code, 200)
+            data = r.json()
+            self.assertTrue(data.get("ok"))
+            self.assertIsNotNone(data.get("partner"))
 
-        # 2. /api/state includes promoPartner
-        r_st = requests.get(f"{SERVER_URL}/api/state?username=test_vp_viewer", timeout=5)
-        self.assertEqual(r_st.status_code, 200)
-        st_data = r_st.json()
-        self.assertIn("promoPartner", st_data)
+            # 2. /api/state includes promoPartner
+            r_st = requests.get(f"{url_base}/api/state?username=test_vp_viewer", timeout=5)
+            self.assertEqual(r_st.status_code, 200)
+            st_data = r_st.json()
+            self.assertIn("promoPartner", st_data)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_07_promo_visual_assets_integrity(self):
         s1_path = os.path.join(PUBLIC_DIR, "img", "promo_screen_1.png")

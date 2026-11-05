@@ -140,6 +140,7 @@ def init_db():
             ("mood_reaction_from", "TEXT DEFAULT ''"),
             ("mood_reaction_at", "REAL DEFAULT 0"),
             ("last_active", "REAL DEFAULT 0"),
+            ("last_menu_version", "TEXT DEFAULT ''"),
         ]
         for cname, ctype in needed:
             if cname not in cols:
@@ -1124,6 +1125,7 @@ def setup_bot_commands():
     ru_commands = [
         {"command": "start", "description": "💑 Открыть приложение «Двое»"},
         {"command": "menu", "description": "📋 Главное меню и кнопки"},
+        {"command": "vp", "description": "🤝 Сотрудничество и ВП"},
         {"command": "pair", "description": "🔗 Привязать вторую половинку"},
         {"command": "invite", "description": "📤 Пригласить партнёра (код)"},
         {"command": "about", "description": "📖 О приложении и возможностях"},
@@ -1131,27 +1133,27 @@ def setup_bot_commands():
         {"command": "status", "description": "ℹ️ Проверить статус пары"},
         {"command": "unlink", "description": "💔 Отвязать текущую пару"},
         {"command": "support", "description": "💬 Написать разработчику в поддержку"},
-        {"command": "vp", "description": "🤝 Взаимный пиар и партнёры"},
     ]
-    tg_api_call("setMyCommands", {
-        "commands": ru_commands,
-        "language_code": "ru"
-    })
     default_commands = [
-        {"command": "start", "description": "Open «Двое» couple app"},
-        {"command": "menu", "description": "Show persistent menu & buttons"},
-        {"command": "pair", "description": "Link with partner"},
-        {"command": "invite", "description": "Invite partner (code)"},
-        {"command": "about", "description": "About app features"},
-        {"command": "nudge", "description": "Send sign of attention"},
-        {"command": "status", "description": "Check relationship status"},
-        {"command": "unlink", "description": "Unlink partner"},
-        {"command": "support", "description": "Contact support / developer"},
-        {"command": "vp", "description": "🤝 Cross-promo & partner channels"},
+        {"command": "start", "description": "💑 Открыть приложение «Двое»"},
+        {"command": "menu", "description": "📋 Главное меню и кнопки"},
+        {"command": "vp", "description": "🤝 Сотрудничество и ВП"},
+        {"command": "pair", "description": "🔗 Привязать вторую половинку"},
+        {"command": "invite", "description": "📤 Пригласить партнёра (код)"},
+        {"command": "about", "description": "📖 О приложении и возможностях"},
+        {"command": "nudge", "description": "💌 Послать знак внимания"},
+        {"command": "status", "description": "ℹ️ Проверить статус пары"},
+        {"command": "unlink", "description": "💔 Отвязать текущую пару"},
+        {"command": "support", "description": "💬 Написать разработчику в поддержку"},
     ]
-    tg_api_call("setMyCommands", {
-        "commands": default_commands
-    })
+    for scope in [None, {"type": "default"}, {"type": "all_private_chats"}]:
+        p_ru = {"commands": ru_commands, "language_code": "ru"}
+        p_def = {"commands": default_commands}
+        if scope:
+            p_ru["scope"] = scope
+            p_def["scope"] = scope
+        tg_api_call("setMyCommands", p_ru)
+        tg_api_call("setMyCommands", p_def)
 
     # Configure Bot Presentation (Name, Short Description & About Description) for default, ru, and en locales
     name_ru = "«Двое» 💕 Приложение для пары"
@@ -1254,11 +1256,97 @@ def keep_alive_worker():
             print(f"[KeepAlive] Ping failed: {e}")
 
 
+CURRENT_MENU_VERSION = "v2.4-vp-menu"
+
+
+def broadcast_updated_menu_to_all_users(force: bool = False) -> int:
+    """Mass-updates persistent ReplyKeyboardMarkup and inline menu for all real users in DB."""
+    if not BOT_TOKEN:
+        return 0
+    with db_lock:
+        conn = get_db()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT tg_id, username, invite_code
+            FROM users
+            WHERE tg_id IS NOT NULL
+              AND tg_id > 10000000
+              AND username NOT LIKE 'test_%'
+              AND username NOT LIKE 'stress_%'
+              AND username NOT LIKE 'nudge_%'
+              AND username NOT LIKE 'mood_notif_%'
+              AND username NOT LIKE 'vptest_%'
+              AND (? = 1 OR COALESCE(last_menu_version, '') != ?)
+            """,
+            (1 if force else 0, CURRENT_MENU_VERSION)
+        ).fetchall()
+        conn.close()
+
+    updated_count = 0
+    for r in rows:
+        uid = r["tg_id"]
+        uname = r["username"] or f"user_{uid}"
+        inv_code = r["invite_code"] or "PAIR-777LOVE"
+        try:
+            ensure_chat_menu_button(uid)
+            u_webapp_url = get_user_webapp_url(uid, uname)
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            inline_kb = [
+                [{"text": "💑 Открыть «Двое»", "web_app": {"url": u_webapp_url}}],
+                [
+                    {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                    {"text": "📤 Пригласить партнёра", "url": share_url}
+                ],
+                [
+                    {"text": "📖 О приложении", "callback_data": "about_app"},
+                    {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"}
+                ],
+                [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
+            ]
+            partner_ch = get_random_active_promo_partner()
+            if partner_ch:
+                p_u = partner_ch["channel_username"].lstrip("@")
+                inline_kb.append([{"text": f"✨ Рекомендуем канал: {partner_ch['channel_title']}", "url": f"https://t.me/{p_u}"}])
+
+            tg_api_call("sendMessage", {
+                "chat_id": uid,
+                "text": (
+                    "📋 <b>Главное меню «Двое» обновлено 💕</b>\n\n"
+                    "Мы обновили меню бота для всех пользователей и добавили раздел "
+                    "<b>«🤝 Сотрудничество и ВП»</b> для дружеских каналов и блогов!"
+                ),
+                "parse_mode": "HTML",
+                "disable_notification": True,
+                "reply_markup": {"inline_keyboard": inline_kb}
+            })
+            res_kb = tg_api_call("sendMessage", {
+                "chat_id": uid,
+                "text": "💫 <b>Обновлённое быстрое меню закреплено внизу экрана:</b>",
+                "parse_mode": "HTML",
+                "disable_notification": True,
+                "reply_markup": get_main_reply_keyboard(chat_id=uid, uname=uname)
+            })
+            if res_kb and res_kb.get("ok"):
+                updated_count += 1
+            with db_lock:
+                conn = get_db()
+                conn.execute("UPDATE users SET last_menu_version = ? WHERE tg_id = ?", (CURRENT_MENU_VERSION, uid))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"[Broadcast Menu Update Error] uid={uid}: {e}")
+    if updated_count > 0:
+        print(f"[Broadcast Menu Update] Updated persistent menu for {updated_count} user(s) ({CURRENT_MENU_VERSION})")
+    return updated_count
+
+
 def telegram_polling_worker():
     """Bot worker: handles /start (with pair_<code>), /pair, /unlink, /support tickets & callbacks."""
     offset = 0
     print("[Bot Worker] Telegram polling started...")
-    ensure_global_menu_and_commands()
+    ensure_global_menu_and_commands(force_commands=True)
+    threading.Thread(target=broadcast_updated_menu_to_all_users, daemon=True).start()
     while True:
         try:
             res = tg_api_call("getUpdates", {"offset": offset, "timeout": 15})
