@@ -2201,7 +2201,6 @@ def telegram_polling_worker():
                         share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
                         share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
 
-                        partner_ch = get_random_active_promo_partner()
                         if paired_now:
                             welcome = (
                                 f"🎉 <b>Вы успешно соединились с {html.escape(inviter_name)}!</b> 💕\n\n"
@@ -2219,10 +2218,6 @@ def telegram_polling_worker():
                                 "🖼 <b>Фото 1:1</b> — профили с любимыми фотографиями\n\n"
                                 f"🔗 <b>Ваш код для пары:</b> <code>{inv_code}</code>"
                             )
-                            if partner_ch:
-                                p_title = html.escape(partner_ch["channel_title"])
-                                p_u = partner_ch["channel_username"].lstrip("@")
-                                welcome += f"\n\n✨ <b>Рекомендуем канал:</b> <a href=\"https://t.me/{p_u}\">{p_title}</a>"
 
                         kb = [
                             [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
@@ -2236,8 +2231,6 @@ def telegram_polling_worker():
                             ],
                             [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
                         ]
-                        if partner_ch:
-                            kb.append([{"text": f"✨ Рекомендуем: {partner_ch['channel_title']}", "url": f"https://t.me/{partner_ch['channel_username'].lstrip('@')}"}])
 
                         tg_send_photo(chat_id, BANNER_IMAGE_PATH, welcome, reply_markup={"inline_keyboard": kb}, uname=uname)
                         tg_send_message(
