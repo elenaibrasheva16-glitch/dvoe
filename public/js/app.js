@@ -700,7 +700,33 @@
       }
     }
 
+    renderPromoPartner(data.promoPartner);
     updateLiveTimer();
+  }
+
+  function renderPromoPartner(promoPartner) {
+    const card = document.getElementById('promo-partner-card');
+    if (!card) return;
+    if (!promoPartner || !promoPartner.channel_username) {
+      card.classList.add('hidden');
+      return;
+    }
+    const titleEl = document.getElementById('promo-partner-title');
+    const descEl = document.getElementById('promo-partner-desc');
+    const linkEl = document.getElementById('promo-partner-link');
+    if (titleEl) titleEl.textContent = promoPartner.channel_title || promoPartner.channel_username;
+    if (descEl) descEl.textContent = promoPartner.channel_description || 'Рекомендуемый канал';
+    if (linkEl) {
+      const rawU = (promoPartner.channel_username || '').replace(/^@/, '');
+      linkEl.href = `https://t.me/${rawU}`;
+      linkEl.onclick = (e) => {
+        if (window.Telegram && Telegram.WebApp && typeof Telegram.WebApp.openTelegramLink === 'function') {
+          e.preventDefault();
+          Telegram.WebApp.openTelegramLink(`https://t.me/${rawU}`);
+        }
+      };
+    }
+    card.classList.remove('hidden');
   }
 
   // --- Fetch State ---
@@ -1275,6 +1301,13 @@
     setupEventListeners();
 
     await loadState();
+
+    try {
+      const pData = await apiGet('/api/promo_partner');
+      if (pData && pData.ok && pData.partner) {
+        renderPromoPartner(pData.partner);
+      }
+    } catch (e) {}
 
     // Start live timer ticking every 1000ms
     state.timerInterval = setInterval(updateLiveTimer, 1000);

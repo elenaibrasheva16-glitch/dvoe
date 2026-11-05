@@ -28,7 +28,7 @@
     if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
       return "user_" + tg.initDataUnsafe.user.id;
     }
-    return "ksjjfnnn";
+    return "demo_user";
   }
 
   function escapeHtml(str) {
@@ -526,7 +526,7 @@
       haptic("medium");
       const res = await apiPost("/api/support", { message: text });
       if (res) {
-        showToast("Сообщение отправлено разработчику (@ksjjfnnn)! 💌");
+        showToast("Сообщение отправлено разработчику! 💌");
         STATE.showSupportModal = false;
         renderApp();
       }

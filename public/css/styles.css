@@ -1235,6 +1235,86 @@ html, body {
   opacity: 1;
 }
 
+/* ==============================================================================
+   Promo Partner Card (Cross-Promo / ВП)
+   ============================================================================== */
+.promo-partner-card {
+  margin-top: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.promo-partner-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.promo-partner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.promo-partner-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent-pink);
+  background: rgba(255, 107, 129, 0.12);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+}
+
+.promo-partner-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.promo-partner-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.promo-partner-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.promo-partner-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.promo-partner-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.promo-partner-btn {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
 /* Utility Helpers */
 .hidden {
   display: none !important;

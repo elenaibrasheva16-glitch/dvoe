@@ -21,13 +21,17 @@ echo ">>> [2/3] Running Production Mass Usage & Concurrency Audit..."
 python3 tests/test_mass_usage_audit.py
 
 echo ""
-echo ">>> [3/3] Running Frontend JavaScriptCore Test Suite..."
+echo ">>> [3/4] Running Frontend JavaScriptCore Test Suite..."
 JSC_BIN="/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc"
 if [ -x "$JSC_BIN" ]; then
     "$JSC_BIN" tests/test_dvoe_frontend.js
 else
     echo "[Skip] jsc binary not found at $JSC_BIN"
 fi
+
+echo ""
+echo ">>> [4/4] Running Cross-Promo (ВП), Partner System & Privacy Audit Test Suite..."
+python3 tests/test_vp_promo_system.py
 
 echo ""
 echo "================================================================================"
