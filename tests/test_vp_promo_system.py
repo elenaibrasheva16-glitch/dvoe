@@ -26,12 +26,19 @@ if BASE_DIR not in sys.path:
 from backend.server import (
     DB_PATH,
     PUBLIC_DIR,
+    ADMIN_SYNC_TOKEN,
     normalize_promo_code,
     add_or_update_promo_channel,
+    activate_promo_channel,
     deactivate_promo_channel,
+    delete_promo_channel_permanently,
+    build_vpadmin_panel,
+    export_db_snapshot,
+    import_db_snapshot,
     record_promo_referral,
     get_random_active_promo_partner,
     get_all_promo_channels,
+    get_promo_channel_by_code,
     get_promo_creative_text,
 )
 
@@ -52,6 +59,7 @@ class TestVpPromoSystem(unittest.TestCase):
         conn = sqlite3.connect(DB_PATH)
         conn.execute("DELETE FROM promo_referrals WHERE code LIKE 'test_%'")
         conn.execute("DELETE FROM promo_channels WHERE code LIKE 'test_%'")
+        conn.execute("DELETE FROM users WHERE username LIKE 'test_%'")
         conn.commit()
         conn.close()
 
@@ -99,15 +107,22 @@ class TestVpPromoSystem(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["clicks"], 2)
 
-    def test_04_deactivate_channel(self):
+    def test_04_deactivate_and_reactivate_channel(self):
         success = deactivate_promo_channel("test_romance")
         self.assertTrue(success)
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT active FROM promo_channels WHERE code = 'test_romance'").fetchone()
-        conn.close()
-        self.assertEqual(row["active"], 0)
+        ch_paused = get_promo_channel_by_code("test_romance")
+        self.assertIsNotNone(ch_paused)
+        self.assertEqual(ch_paused["active"], 0)
+
+        # Resume channel
+        resumed = activate_promo_channel("test_romance")
+        self.assertTrue(resumed)
+        ch_active = get_promo_channel_by_code("test_romance")
+        self.assertEqual(ch_active["active"], 1)
+
+        # Pause again
+        self.assertTrue(deactivate_promo_channel("@test_romance"))
 
     def test_05_creative_text_generation(self):
         # 1. Variant A (default / aesthetic)
@@ -140,7 +155,7 @@ class TestVpPromoSystem(unittest.TestCase):
             for forbidden in ["danil", "ksjjfnnn", "adamlanda", "данил", "адам", "8565474570"]:
                 self.assertNotIn(forbidden, txt.lower())
 
-    def test_06_http_api_endpoints(self):
+    def test_06_http_api_endpoints_and_admin_sync(self):
         import threading
         from backend.server import ThreadingHTTPServer, DvoeHTTPHandler
         srv = ThreadingHTTPServer(("127.0.0.1", 0), DvoeHTTPHandler)
@@ -164,6 +179,56 @@ class TestVpPromoSystem(unittest.TestCase):
             self.assertEqual(r_st.status_code, 200)
             st_data = r_st.json()
             self.assertIn("promoPartner", st_data)
+
+            # 3. /api/admin/sync unauthorized check
+            r_unauth = requests.get(f"{url_base}/api/admin/sync?token=wrong", timeout=5)
+            self.assertEqual(r_unauth.status_code, 403)
+
+            # 4. /api/admin/sync authorized export
+            r_sync = requests.get(f"{url_base}/api/admin/sync?token={ADMIN_SYNC_TOKEN}", timeout=5)
+            self.assertEqual(r_sync.status_code, 200)
+            sync_data = r_sync.json()
+            self.assertTrue(sync_data.get("ok"))
+            self.assertIn("promo_channels", sync_data)
+
+            # 5. /api/admin/vp lifecycle (add -> pause -> resume -> delete)
+            r_add = requests.post(f"{url_base}/api/admin/vp", json={
+                "token": ADMIN_SYNC_TOKEN,
+                "action": "add",
+                "channel_username": "@test_api_vp",
+                "channel_title": "Тест API ВП",
+                "channel_description": "Описание теста",
+                "code": "test_api_vp"
+            }, timeout=5)
+            self.assertEqual(r_add.status_code, 200)
+            self.assertTrue(r_add.json().get("ok"))
+
+            r_pause = requests.post(f"{url_base}/api/admin/vp", json={
+                "token": ADMIN_SYNC_TOKEN,
+                "action": "pause",
+                "code": "test_api_vp"
+            }, timeout=5)
+            self.assertEqual(r_pause.status_code, 200)
+            self.assertTrue(r_pause.json().get("ok"))
+            self.assertEqual(get_promo_channel_by_code("test_api_vp")["active"], 0)
+
+            r_resume = requests.post(f"{url_base}/api/admin/vp", json={
+                "token": ADMIN_SYNC_TOKEN,
+                "action": "resume",
+                "code": "test_api_vp"
+            }, timeout=5)
+            self.assertEqual(r_resume.status_code, 200)
+            self.assertTrue(r_resume.json().get("ok"))
+            self.assertEqual(get_promo_channel_by_code("test_api_vp")["active"], 1)
+
+            r_del = requests.post(f"{url_base}/api/admin/vp", json={
+                "token": ADMIN_SYNC_TOKEN,
+                "action": "delete",
+                "code": "test_api_vp"
+            }, timeout=5)
+            self.assertEqual(r_del.status_code, 200)
+            self.assertTrue(r_del.json().get("ok"))
+            self.assertIsNone(get_promo_channel_by_code("test_api_vp"))
         finally:
             srv.shutdown()
             srv.server_close()
@@ -207,7 +272,7 @@ class TestVpPromoSystem(unittest.TestCase):
         self.assertTrue(pack["template_2_bot"]["privacy_clean"])
         self.assertTrue(pack["template_3_comment"]["privacy_clean"])
 
-    def test_10_deactivate_channel_by_username(self):
+    def test_10_deactivate_and_delete_channel_by_username(self):
         # Add channel with custom code
         add_or_update_promo_channel("@test_user_deact", "Канал Тест", custom_code="test_code_deact")
         
@@ -215,11 +280,25 @@ class TestVpPromoSystem(unittest.TestCase):
         success = deactivate_promo_channel("@test_user_deact")
         self.assertTrue(success)
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT active FROM promo_channels WHERE code = 'test_code_deact'").fetchone()
-        conn.close()
+        row = get_promo_channel_by_code("test_code_deact")
         self.assertEqual(row["active"], 0)
+
+        # Permanently delete by @username
+        self.assertTrue(delete_promo_channel_permanently("@test_user_deact"))
+        self.assertIsNone(get_promo_channel_by_code("test_code_deact"))
+
+    def test_11_polina_channel_and_vpadmin_panel(self):
+        polina = get_promo_channel_by_code("blogtpdevochki")
+        self.assertIsNotNone(polina)
+        self.assertEqual(polina["channel_username"], "@blogtpdevochki")
+        self.assertEqual(polina["channel_title"], "блог девочки ❄️")
+        self.assertEqual(polina["channel_description"], "девчачий блог про креатив, учебу, искренность и отношения💋❄️")
+        self.assertEqual(polina["active"], 1)
+
+        panel_text, panel_kb = build_vpadmin_panel()
+        self.assertIn("блог девочки ❄️", panel_text)
+        self.assertIn("blogtpdevochki", panel_text)
+        self.assertIn("inline_keyboard", panel_kb)
 
 if __name__ == "__main__":
     unittest.main()

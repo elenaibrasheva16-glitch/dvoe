@@ -795,7 +795,7 @@ class TestDvoeBackend(unittest.TestCase):
         self.assertTrue(kb.get("is_persistent"))
 
         rows = kb["keyboard"]
-        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(rows), 5)
 
         # Row 1: WebApp button
         self.assertEqual(rows[0][0]["text"], "💑 Открыть «Двое»")
@@ -804,13 +804,16 @@ class TestDvoeBackend(unittest.TestCase):
         self.assertEqual(rows[1][0]["text"], "🔗 Привязать партнёра")
         self.assertEqual(rows[1][1]["text"], "📤 Пригласить партнёра")
 
-        # Row 3: About & Support
-        self.assertEqual(rows[2][0]["text"], "📖 О приложении")
-        self.assertEqual(rows[2][1]["text"], "💬 Связь с разработчиком")
+        # Row 3: Nudge & Status buttons
+        self.assertEqual(rows[2][0]["text"], "💌 Послать знак внимания")
+        self.assertEqual(rows[2][1]["text"], "ℹ️ Мой статус")
 
-        # Row 4: Nudge & Status buttons
-        self.assertEqual(rows[3][0]["text"], "💌 Послать знак внимания")
-        self.assertEqual(rows[3][1]["text"], "ℹ️ Мой статус")
+        # Row 4: About & VP Collaboration
+        self.assertEqual(rows[3][0]["text"], "📖 О приложении")
+        self.assertEqual(rows[3][1]["text"], "🤝 Сотрудничество и ВП")
+
+        # Row 5: Support
+        self.assertEqual(rows[4][0]["text"], "💬 Связь с разработчиком")
 
         # 2. Verify commands setup function executes cleanly
         setup_bot_commands()

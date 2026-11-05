@@ -52,6 +52,8 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "ChibiLovePara_bot")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "ksjjfnnn")
 ADMIN_TG_ID = int(os.environ.get("ADMIN_TG_ID", "8565474570"))
 PORT = int(os.environ.get("PORT", "8085"))
+DISABLE_BOT_POLLING = os.environ.get("DISABLE_BOT_POLLING", "0").strip().lower() in ("1", "true", "yes")
+ADMIN_SYNC_TOKEN = hashlib.sha256(f"dvoe_sync_{BOT_TOKEN}_{ADMIN_TG_ID}".encode("utf-8")).hexdigest()[:32]
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
@@ -233,7 +235,7 @@ def init_db():
         cur.execute("UPDATE users SET invite_code = 'PAIR-DVOE23' WHERE username = 'ksjjfnnn' AND (invite_code = 'PAIR-1CAAF2' OR invite_code IS NULL OR invite_code = '')")
         # Clean invisible soft hyphen \xad from any user display_name
         for r_u in cur.execute("SELECT username, display_name FROM users WHERE display_name LIKE '%\xad%'").fetchall():
-            cleaned_dn = normalize_display_name(r_u["display_name"], fallback=r_u["username"])
+            cleaned_dn = normalize_display_name(r_u["display_name"] or r_u["username"])
             cur.execute("UPDATE users SET display_name = ? WHERE username = ?", (cleaned_dn, r_u["username"]))
 
         # Sync existing uploads to uploaded_files
@@ -249,6 +251,27 @@ def init_db():
                                             (fname, f_up.read(), time.time()))
         except Exception:
             pass
+
+        # Ensure Polina's partner channel (@blogtpdevochki) exists in promo_channels with exact description
+        existing_polina = cur.execute("SELECT code FROM promo_channels WHERE code = 'blogtpdevochki'").fetchone()
+        if not existing_polina:
+            cur.execute(
+                """
+                INSERT INTO promo_channels (code, channel_username, channel_title, channel_description, clicks, active, created_at)
+                VALUES ('blogtpdevochki', '@blogtpdevochki', 'блог девочки ❄️', 'девчачий блог про креатив, учебу, искренность и отношения💋❄️', 1, 1, ?)
+                """,
+                (time.time(),)
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE promo_channels
+                SET channel_username = '@blogtpdevochki',
+                    channel_title = 'блог девочки ❄️',
+                    channel_description = 'девчачий блог про креатив, учебу, искренность и отношения💋❄️'
+                WHERE code = 'blogtpdevochki'
+                """
+            )
 
         conn.commit()
         conn.close()
@@ -335,7 +358,7 @@ def get_all_promo_channels():
         conn = get_db()
         cur = conn.cursor()
         rows = cur.execute(
-            "SELECT code, channel_username, channel_title, channel_description, clicks, active, created_at FROM promo_channels ORDER BY clicks DESC, created_at DESC"
+            "SELECT code, channel_username, channel_title, channel_description, clicks, active, created_at FROM promo_channels ORDER BY active DESC, clicks DESC, created_at DESC"
         ).fetchall()
         conn.close()
     res = []
@@ -346,6 +369,20 @@ def get_all_promo_channels():
             d["channel_username"] = f"@{u}"
         res.append(d)
     return res
+
+
+def get_promo_channel_by_code(code_or_username: str):
+    """Finds a promo channel by code or @username."""
+    c = normalize_promo_code(code_or_username)
+    clean_u = str(code_or_username or "").strip().lstrip("@").lower()
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        row = cur.execute("SELECT * FROM promo_channels WHERE LOWER(code) = LOWER(?)", (c,)).fetchone()
+        if not row and clean_u:
+            row = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = ?", (clean_u,)).fetchone()
+        conn.close()
+    return dict(row) if row else None
 
 
 def add_or_update_promo_channel(username: str, title: str, description: str = "", custom_code: str = None) -> dict:
@@ -390,8 +427,25 @@ def add_or_update_promo_channel(username: str, title: str, description: str = ""
     }
 
 
+def activate_promo_channel(code: str) -> bool:
+    """Activates (resumes) a promo channel by code or channel username."""
+    c = normalize_promo_code(code)
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("UPDATE promo_channels SET active = 1 WHERE LOWER(code) = LOWER(?)", (c,))
+        changed = cur.rowcount > 0
+        if not changed:
+            clean_u = code.strip().lstrip("@").lower()
+            cur.execute("UPDATE promo_channels SET active = 1 WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (clean_u,))
+            changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+    return changed
+
+
 def deactivate_promo_channel(code: str) -> bool:
-    """Deactivates a promo channel by code or channel username."""
+    """Deactivates (pauses) a promo channel by code or channel username."""
     c = normalize_promo_code(code)
     with db_lock:
         conn = get_db()
@@ -405,6 +459,183 @@ def deactivate_promo_channel(code: str) -> bool:
         conn.commit()
         conn.close()
     return changed
+
+
+def delete_promo_channel_permanently(code: str) -> bool:
+    """Permanently deletes a promo channel by code or channel username."""
+    c = normalize_promo_code(code)
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM promo_channels WHERE LOWER(code) = LOWER(?)", (c,))
+        changed = cur.rowcount > 0
+        if not changed:
+            clean_u = code.strip().lstrip("@").lower()
+            cur.execute("DELETE FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (clean_u,))
+            changed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+    return changed
+
+
+def build_vpadmin_panel() -> tuple:
+    """Builds interactive VP Admin Panel text and inline_keyboard for 1-click collaboration management."""
+    channels = get_all_promo_channels()
+    active_cnt = sum(1 for c in channels if c.get("active"))
+    total_clicks = sum((c.get("clicks") or 0) for c in channels)
+
+    lines = [
+        "🎛 <b>Управление сотрудничеством и ВП («Двое»)</b>\n",
+        f"📢 <b>Всего каналов:</b> <code>{len(channels)}</code> (активных: <b>{active_cnt}</b>)",
+        f"👥 <b>Всего приведено пользователей:</b> <code>{total_clicks}</code>\n"
+    ]
+
+    kb = []
+    if not channels:
+        lines.append("<i>Список партнёрских каналов пока пуст. Нажмите кнопку ниже, чтобы добавить первый канал!</i>")
+    else:
+        for i, ch in enumerate(channels, 1):
+            is_act = bool(ch.get("active"))
+            st_badge = "🟢 Активен" if is_act else "⏸ Приостановлен"
+            code = ch["code"]
+            title = html.escape(ch.get("channel_title") or ch.get("channel_username") or code)
+            u = html.escape(ch.get("channel_username") or "")
+            desc = html.escape(ch.get("channel_description") or "")
+            clicks = ch.get("clicks", 0)
+            link = f"https://t.me/{BOT_USERNAME}?start=vp_{code}"
+            lines.append(
+                f"<b>{i}. {title}</b> ({u}) — {st_badge}\n"
+                f"• Код: <code>{code}</code> | Переходов: <b>{clicks}</b>\n" +
+                (f"• Описание: <i>{desc}</i>\n" if desc else "") +
+                f"• Ссылка: {link}\n"
+            )
+            toggle_btn = (
+                {"text": f"⏸ Стоп: {ch['channel_title'][:14]}", "callback_data": f"vp_adm_pause:{code}"}
+                if is_act else
+                {"text": f"▶️ Вкл: {ch['channel_title'][:14]}", "callback_data": f"vp_adm_resume:{code}"}
+            )
+            kb.append([
+                toggle_btn,
+                {"text": "📥 Пост", "callback_data": f"vp_get_creative:{code}"},
+                {"text": "🗑 Удалить", "callback_data": f"vp_adm_del:{code}"}
+            ])
+
+    kb.append([{"text": "➕ Добавить новый канал", "callback_data": "vp_adm_add_prompt"}])
+    if active_cnt > 0:
+        kb.append([{"text": "⏸ Приостановить все показы", "callback_data": "vp_adm_pause_all"}])
+    elif len(channels) > 0:
+        kb.append([{"text": "▶️ Включить все каналы", "callback_data": "vp_adm_resume_all"}])
+    kb.append([
+        {"text": "🔄 Обновить панель", "callback_data": "vp_adm_refresh"},
+        {"text": "📊 Общая статистика", "callback_data": "vp_adm_overall_stats"}
+    ])
+    return "\n".join(lines), {"inline_keyboard": kb}
+
+
+def export_db_snapshot() -> dict:
+    """Exports full database state (users, promo_channels, promo_referrals, support_tickets) for safe cloud/git sync."""
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        users = [dict(r) for r in cur.execute("SELECT * FROM users WHERE username NOT LIKE 'test_%' AND username NOT LIKE 'stress_%'").fetchall()]
+        promo_channels = [dict(r) for r in cur.execute("SELECT * FROM promo_channels WHERE code NOT LIKE 'test_%'").fetchall()]
+        promo_referrals = [dict(r) for r in cur.execute("SELECT * FROM promo_referrals WHERE code NOT LIKE 'test_%'").fetchall()]
+        support_tickets = [dict(r) for r in cur.execute("SELECT * FROM support_tickets WHERE username NOT LIKE 'test_%'").fetchall()]
+        conn.close()
+    return {
+        "ok": True,
+        "exported_at": time.time(),
+        "users": users,
+        "promo_channels": promo_channels,
+        "promo_referrals": promo_referrals,
+        "support_tickets": support_tickets,
+    }
+
+
+def import_db_snapshot(snapshot: dict) -> dict:
+    """Merges an exported database snapshot into local SQLite DB without losing newer records."""
+    if not isinstance(snapshot, dict):
+        return {"ok": False, "error": "Invalid snapshot"}
+    merged_users = 0
+    merged_channels = 0
+    merged_referrals = 0
+    with db_lock:
+        conn = get_db()
+        cur = conn.cursor()
+        for ch in snapshot.get("promo_channels", []):
+            code = ch.get("code")
+            if not code:
+                continue
+            existing = cur.execute("SELECT clicks FROM promo_channels WHERE code = ?", (code,)).fetchone()
+            clicks = max(int(ch.get("clicks") or 0), int(existing["clicks"] or 0) if existing else 0)
+            cur.execute(
+                """
+                INSERT INTO promo_channels (code, channel_username, channel_title, channel_description, clicks, active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code) DO UPDATE SET
+                    channel_username = excluded.channel_username,
+                    channel_title = excluded.channel_title,
+                    channel_description = excluded.channel_description,
+                    clicks = MAX(promo_channels.clicks, excluded.clicks),
+                    active = excluded.active
+                """,
+                (
+                    code,
+                    ch.get("channel_username", ""),
+                    ch.get("channel_title", ""),
+                    ch.get("channel_description", ""),
+                    clicks,
+                    int(ch.get("active", 1)),
+                    float(ch.get("created_at") or time.time()),
+                )
+            )
+            merged_channels += 1
+
+        for ref in snapshot.get("promo_referrals", []):
+            tid = ref.get("tg_id")
+            rcode = ref.get("code")
+            if tid and rcode:
+                cur.execute(
+                    "INSERT OR IGNORE INTO promo_referrals (tg_id, code, created_at) VALUES (?, ?, ?)",
+                    (int(tid), str(rcode), float(ref.get("created_at") or time.time()))
+                )
+                merged_referrals += 1
+
+        for u in snapshot.get("users", []):
+            uname = u.get("username")
+            if not uname or str(uname).startswith(("test_", "stress_")):
+                continue
+            ex_u = cur.execute("SELECT last_active FROM users WHERE username = ?", (uname,)).fetchone()
+            if not ex_u or float(u.get("last_active") or 0) >= float(ex_u["last_active"] or 0):
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO users (
+                        username, tg_id, display_name, photo_url, photo_custom, invite_code,
+                        mood, mood_emoji, mood_label, mood_reason, mood_updated_at,
+                        mood_reaction, mood_reaction_from, mood_reaction_at,
+                        partner_username, paired_at, anniversary_date, last_active, created_at, last_menu_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uname, u.get("tg_id"), u.get("display_name", uname),
+                        u.get("photo_url", ""), u.get("photo_custom", ""), u.get("invite_code", ""),
+                        u.get("mood", "happy"), u.get("mood_emoji", "🥰"), u.get("mood_label", "Люблю"),
+                        u.get("mood_reason", ""), float(u.get("mood_updated_at") or 0),
+                        u.get("mood_reaction", ""), u.get("mood_reaction_from", ""), float(u.get("mood_reaction_at") or 0),
+                        u.get("partner_username"), float(u.get("paired_at") or 0), u.get("anniversary_date", ""),
+                        float(u.get("last_active") or 0), float(u.get("created_at") or 0), u.get("last_menu_version", "")
+                    )
+                )
+                merged_users += 1
+
+        conn.commit()
+        conn.close()
+    return {
+        "ok": True,
+        "merged_users": merged_users,
+        "merged_channels": merged_channels,
+        "merged_referrals": merged_referrals,
+    }
 
 
 def get_promo_creative_text(channel_code: str = "partner", variant: str = "a") -> str:
@@ -1155,6 +1386,24 @@ def setup_bot_commands():
         tg_api_call("setMyCommands", p_ru)
         tg_api_call("setMyCommands", p_def)
 
+    if ADMIN_TG_ID:
+        admin_commands = ru_commands + [
+            {"command": "vpadmin", "description": "🎛 Панель управления каналами ВП (1 клик)"},
+            {"command": "vpstats", "description": "📊 Статистика каналов-партнёров"},
+            {"command": "stats", "description": "📈 Общая статистика пользователей и пар"},
+            {"command": "addvp", "description": "➕ Добавить партнёрский канал"},
+            {"command": "delvp", "description": "⏸ Приостановить показ канала"},
+            {"command": "resumevp", "description": "▶️ Возобновить показ канала"},
+        ]
+        for lang in ("", "ru"):
+            adm_payload = {
+                "commands": admin_commands,
+                "scope": {"type": "chat", "chat_id": ADMIN_TG_ID}
+            }
+            if lang:
+                adm_payload["language_code"] = lang
+            tg_api_call("setMyCommands", adm_payload)
+
     # Configure Bot Presentation (Name, Short Description & About Description) for default, ru, and en locales
     name_ru = "«Двое» 💕 Приложение для пары"
     name_en = "«Двое» 💕 Couple App"
@@ -1624,6 +1873,105 @@ def telegram_polling_worker():
                                 reply_markup={"inline_keyboard": [[{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}]]},
                                 uname=uname
                             )
+                    elif data and data.startswith("vp_adm_"):
+                        if chat_id != ADMIN_TG_ID:
+                            tg_send_message(chat_id, "⛔️ Доступно только администратору.", uname=uname)
+                            continue
+                        if data == "vp_adm_refresh":
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                        elif data == "vp_adm_add_prompt":
+                            with db_lock:
+                                conn = get_db()
+                                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_admin_add_vp', ?)", (chat_id, time.time()))
+                                conn.commit()
+                                conn.close()
+                            tg_send_message(
+                                chat_id,
+                                "➕ <b>Добавление нового канала к сотрудничеству</b>\n\n"
+                                "Отправьте одним сообщением данные канала через вертикальную черту <code>|</code>:\n"
+                                "<code>@юзернейм | Название канала | Короткое описание</code>\n\n"
+                                "<i>Пример:</i>\n"
+                                "<code>@blogtpdevochki | блог девочки ❄️ | Уютный лайф-блог про жизнь, учёбу и атмосферу</code>",
+                                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
+                                uname=uname
+                            )
+                        elif data == "vp_adm_pause_all":
+                            with db_lock:
+                                conn = get_db()
+                                conn.execute("UPDATE promo_channels SET active = 0")
+                                conn.commit()
+                                conn.close()
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, "⏸ <b>Все показы партнёрских каналов приостановлены.</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        elif data == "vp_adm_resume_all":
+                            with db_lock:
+                                conn = get_db()
+                                conn.execute("UPDATE promo_channels SET active = 1")
+                                conn.commit()
+                                conn.close()
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, "▶️ <b>Все партнёрские каналы снова включены!</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        elif data == "vp_adm_overall_stats":
+                            with db_lock:
+                                conn = get_db()
+                                cur = conn.cursor()
+                                total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
+                                paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
+                                active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
+                                promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
+                                conn.close()
+                            total_pairs = paired_users // 2
+                            tg_send_message(
+                                chat_id,
+                                f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
+                                f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
+                                f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
+                                f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
+                                f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>",
+                                reply_markup={"inline_keyboard": [[{"text": "🎛 Назад в панель управления ВП", "callback_data": "vp_adm_refresh"}]]},
+                                uname=uname
+                            )
+                        elif data.startswith("vp_adm_pause:"):
+                            code_arg = data.split(":", 1)[1]
+                            deactivate_promo_channel(code_arg)
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_arg)}</code> приостановлено (канал скрыт из рекомендаций).\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        elif data.startswith("vp_adm_resume:"):
+                            code_arg = data.split(":", 1)[1]
+                            activate_promo_channel(code_arg)
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_arg)}</code> возобновлено (канал снова в рекомендациях)!\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        elif data.startswith("vp_adm_del:"):
+                            code_arg = data.split(":", 1)[1]
+                            delete_promo_channel_permanently(code_arg)
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_arg)}</code> полностью удалён из базы.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        elif data.startswith("vp_adm_quick_approve:"):
+                            # Format: vp_adm_quick_approve:<applicant_tg_id>:<channel_username>
+                            parts_qa = data.split(":")
+                            app_uid = int(parts_qa[1]) if len(parts_qa) > 1 and parts_qa[1].isdigit() else 0
+                            ch_u = parts_qa[2] if len(parts_qa) > 2 else ""
+                            if ch_u:
+                                ch_info = add_or_update_promo_channel(ch_u, f"Канал @{ch_u.lstrip('@')}", "Уютный авторский Telegram-канал")
+                                ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
+                                p_text, p_kb = build_vpadmin_panel()
+                                tg_send_message(
+                                    chat_id,
+                                    f"✅ <b>Канал {ch_info['channel_username']} подключён в один клик!</b>\n"
+                                    f"🔗 Ссылка: {ref_link}\n\n" + p_text,
+                                    reply_markup=p_kb,
+                                    uname=uname
+                                )
+                                if app_uid:
+                                    tg_send_message(
+                                        app_uid,
+                                        f"🎉 <b>Ваш канал {ch_info['channel_username']} подключён к сотрудничеству с «Двое»!</b> 💕\n\n"
+                                        f"Теперь ваш канал отображается в рекомендациях для наших пользователей.\n\n"
+                                        f"🔗 <b>Ваша именная ссылка для поста:</b>\n{ref_link}\n\n"
+                                        "Нажмите кнопку ниже, чтобы получить готовый пост и баннер:",
+                                        reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch_info['code']}"}]]}
+                                    )
                     continue
 
                 # Handle Messages
@@ -1662,16 +2010,18 @@ def telegram_polling_worker():
                             tg_send_message(ADMIN_TG_ID, f"✅ Ответ успешно передан пользователю (TG ID: <code>{user_dest_id}</code>).")
                             continue
 
-                    # 2. Check Support Session
+                    # 2. Check Support Session or Admin Interactive VP Add Session
                     in_support = False
                     is_vp_app = False
+                    is_admin_add_vp = False
                     with db_lock:
                         conn = get_db()
                         sess = conn.execute("SELECT state, updated_at FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
-                        if sess and sess["state"] in ("awaiting_ticket", "awaiting_vp_application"):
+                        if sess and sess["state"] in ("awaiting_ticket", "awaiting_vp_application", "awaiting_admin_add_vp"):
                             if time.time() - (sess["updated_at"] or 0) < 900:
                                 in_support = True
                                 is_vp_app = (sess["state"] == "awaiting_vp_application")
+                                is_admin_add_vp = (sess["state"] == "awaiting_admin_add_vp")
                             else:
                                 conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
                                 conn.commit()
@@ -1684,6 +2034,33 @@ def telegram_polling_worker():
                             conn.commit()
                             conn.close()
                         in_support = False
+
+                    if in_support and is_admin_add_vp and tg_id == ADMIN_TG_ID:
+                        with db_lock:
+                            conn = get_db()
+                            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                            conn.commit()
+                            conn.close()
+                        parts = [p.strip() for p in text.split("|")]
+                        if len(parts) >= 2:
+                            ch_u = parts[0]
+                            ch_title = parts[1]
+                            ch_desc = parts[2] if len(parts) > 2 else ""
+                        else:
+                            # Allow single @username input with sensible defaults
+                            ch_u = parts[0].split()[0]
+                            ch_title = parts[0]
+                            ch_desc = "Уютный авторский Telegram-канал"
+                        ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
+                        p_text, p_kb = build_vpadmin_panel()
+                        tg_send_message(
+                            chat_id,
+                            f"✅ <b>Канал {ch_info['channel_username']} успешно добавлен и включён!</b>\n"
+                            f"🔗 Ссылка для партнёра: https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}\n\n" + p_text,
+                            reply_markup=p_kb,
+                            uname=uname
+                        )
+                        continue
 
                     if in_support:
                         cat = "vp_partnership" if is_vp_app else "support"
@@ -1706,7 +2083,20 @@ def telegram_polling_worker():
                                 f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
                                 f"💬 <b>Текст:</b>\n{html.escape(text)}"
                             )
-                            tg_send_message(ADMIN_TG_ID, admin_msg)
+                            admin_kb = None
+                            if is_vp_app:
+                                m_ch = re.search(r"(?:@|(?:t\.me|telegram\.me)/)([a-zA-Z0-9_]{4,32})", text)
+                                if m_ch:
+                                    extracted_ch = m_ch.group(1)
+                                    admin_kb = {
+                                        "inline_keyboard": [
+                                            [{"text": f"✅ Подключить @{extracted_ch} в 1 клик", "callback_data": f"vp_adm_quick_approve:{tg_id}:{extracted_ch}"}],
+                                            [{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]
+                                        ]
+                                    }
+                                else:
+                                    admin_kb = {"inline_keyboard": [[{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]]}
+                            tg_send_message(ADMIN_TG_ID, admin_msg, reply_markup=admin_kb)
 
                         # Confirm to user
                         confirm_text = (
@@ -1841,6 +2231,7 @@ def telegram_polling_worker():
                             ch_desc = parts[2] if len(parts) > 2 else ""
                             ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
                             ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
+                            p_text, p_kb = build_vpadmin_panel()
                             tg_send_message(
                                 chat_id,
                                 f"✅ <b>Партнёрский канал успешно добавлен!</b>\n\n"
@@ -1848,55 +2239,84 @@ def telegram_polling_worker():
                                 f"📢 <b>Канал:</b> {ch_info['channel_username']}\n"
                                 f"🏷 <b>Название:</b> {html.escape(ch_info['channel_title'])}\n"
                                 f"📝 <b>Описание:</b> {html.escape(ch_info['channel_description'])}\n"
-                                f"🔗 <b>Реферальная ссылка:</b>\n{ref_link}\n\n"
-                                f"<i>Канал активен и будет рекомендоваться в боте и Mini App!</i>",
+                                f"🔗 <b>Реферальная ссылка:</b>\n{ref_link}\n\n" + p_text,
+                                reply_markup=p_kb,
                                 uname=uname
                             )
                         else:
                             tg_send_message(
                                 chat_id,
                                 "⚠️ <b>Использование:</b>\n<code>/addvp @username | Название канала | Краткое описание</code>\n\n"
-                                "Пример:\n<code>/addvp @love_notes | Дневник чувств | Эстетичные цитаты и мысли о любви</code>",
+                                "Пример:\n<code>/addvp @love_notes | Дневник чувств | Эстетичные цитаты и мысли о любви</code>\n\n"
+                                "Либо нажмите кнопку ниже для интерактивного добавления:",
+                                reply_markup={"inline_keyboard": [[{"text": "➕ Добавить канал интерактивно", "callback_data": "vp_adm_add_prompt"}]]},
                                 uname=uname
                             )
                         continue
 
-                    # 3c. Admin Command: /delvp <code>
-                    if text.startswith("/delvp"):
+                    # 3c. Admin Command: /delvp or /pausevp <code> (pauses channel)
+                    if text.startswith(("/delvp", "/pausevp", "/stopvp")):
                         if tg_id != ADMIN_TG_ID:
                             tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
                             continue
-                        code_to_del = text[len("/delvp"):].strip()
+                        cmd_used = text.split()[0]
+                        code_to_del = text[len(cmd_used):].strip()
                         if not code_to_del:
-                            tg_send_message(chat_id, "⚠️ Использование: <code>/delvp <code></code>", uname=uname)
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
                             continue
                         deactivated = deactivate_promo_channel(code_to_del)
+                        p_text, p_kb = build_vpadmin_panel()
                         if deactivated:
-                            tg_send_message(chat_id, f"✅ Канал с кодом <code>{code_to_del}</code> деактивирован.", uname=uname)
+                            tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_to_del)}</code> приостановлено.\n\n" + p_text, reply_markup=p_kb, uname=uname)
                         else:
-                            tg_send_message(chat_id, f"❌ Канал с кодом <code>{code_to_del}</code> не найден.", uname=uname)
+                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_del)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
                         continue
 
-                    # 3d. Admin Command: /vpstats
-                    if text in ("/vpstats", "статистика вп"):
+                    # 3c2. Admin Command: /resumevp <code> (resumes paused channel)
+                    if text.startswith(("/resumevp", "/startvp")):
                         if tg_id != ADMIN_TG_ID:
                             tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
                             continue
-                        channels = get_all_promo_channels()
-                        if not channels:
-                            tg_send_message(chat_id, "📊 Список каналов-партнёров пока пуст. Добавьте первый канал через <code>/addvp</code>.", uname=uname)
+                        cmd_used = text.split()[0]
+                        code_to_res = text[len(cmd_used):].strip()
+                        if not code_to_res:
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                            continue
+                        resumed = activate_promo_channel(code_to_res)
+                        p_text, p_kb = build_vpadmin_panel()
+                        if resumed:
+                            tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_to_res)}</code> возобновлено!\n\n" + p_text, reply_markup=p_kb, uname=uname)
                         else:
-                            msg_lines = ["📊 <b>Статистика каналов-партнёров (ВП):</b>\n"]
-                            for i, ch in enumerate(channels, 1):
-                                st_icon = "✅" if ch.get("active") else "⏸"
-                                link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch['code']}"
-                                msg_lines.append(
-                                    f"{i}. <b>{html.escape(ch['channel_title'])}</b> ({ch['channel_username']}) {st_icon}\n"
-                                    f"• Код: <code>{ch['code']}</code>\n"
-                                    f"• Уникальных переходов: <b>{ch.get('clicks', 0)}</b>\n"
-                                    f"• Ссылка: {link}\n"
-                                )
-                            tg_send_message(chat_id, "\n".join(msg_lines), uname=uname)
+                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_res)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        continue
+
+                    # 3c3. Admin Command: /removevp <code> (permanently deletes channel)
+                    if text.startswith("/removevp"):
+                        if tg_id != ADMIN_TG_ID:
+                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                            continue
+                        code_to_rm = text[len("/removevp"):].strip()
+                        if not code_to_rm:
+                            p_text, p_kb = build_vpadmin_panel()
+                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                            continue
+                        removed = delete_promo_channel_permanently(code_to_rm)
+                        p_text, p_kb = build_vpadmin_panel()
+                        if removed:
+                            tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_to_rm)}</code> полностью удалён.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        else:
+                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_rm)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+                        continue
+
+                    # 3d. Admin Command: /vpstats or /vpadmin (Interactive 1-click collaboration control panel)
+                    if text in ("/vpstats", "/vpadmin", "статистика вп", "панель вп", "управление вп") or text.startswith("/vpadmin"):
+                        if tg_id != ADMIN_TG_ID:
+                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                            continue
+                        p_text, p_kb = build_vpadmin_panel()
+                        tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
                         continue
 
                     # 3d2. Admin Command: /stats or /adminstats (Overall bot user base & pairs)
@@ -1920,9 +2340,14 @@ def telegram_polling_worker():
                             f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
                             f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
                             f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>\n\n"
-                            f"<i>Детальную статистику по конкретным каналам смотрите через команду /vpstats</i>"
+                            f"<i>Управлять партнёрскими каналами в 1 клик можно через кнопку ниже или команду /vpadmin</i>"
                         )
-                        tg_send_message(chat_id, stats_msg, uname=uname)
+                        tg_send_message(
+                            chat_id,
+                            stats_msg,
+                            reply_markup={"inline_keyboard": [[{"text": "🎛 Управление каналами ВП", "callback_data": "vp_adm_refresh"}]]},
+                            uname=uname
+                        )
                         continue
 
                     # 3e. Command: /vp (Mutual PR / Cross-Promo portal)
@@ -2532,6 +2957,15 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "partner": partner})
             return
 
+        # Admin DB Snapshot Export endpoint: /api/admin/sync (GET)
+        if path == "/api/admin/sync":
+            token = qs.get("token", [""])[0] or self.headers.get("X-Admin-Token", "")
+            if token != ADMIN_SYNC_TOKEN:
+                self.send_json({"ok": False, "error": "Unauthorized"}, 403)
+                return
+            self.send_json(export_db_snapshot())
+            return
+
         # State endpoint: /api/state or /api/user-state
         if path in ("/api/state", "/api/user-state", "/api/sync"):
             raw_uname = qs.get("username", [""])[0] or qs.get("tg_user", [""])[0] or qs.get("user", [""])[0]
@@ -2599,6 +3033,49 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         data = self.read_json_body()
+
+        # Admin DB Snapshot Import endpoint: /api/admin/sync (POST)
+        if path == "/api/admin/sync":
+            token = data.get("token") or self.headers.get("X-Admin-Token", "")
+            if token != ADMIN_SYNC_TOKEN:
+                self.send_json({"ok": False, "error": "Unauthorized"}, 403)
+                return
+            res = import_db_snapshot(data.get("snapshot", data))
+            self.send_json(res, 200 if res.get("ok") else 400)
+            return
+
+        # Admin VP Management API endpoint: /api/admin/vp (POST)
+        if path == "/api/admin/vp":
+            token = data.get("token") or self.headers.get("X-Admin-Token", "")
+            if token != ADMIN_SYNC_TOKEN:
+                self.send_json({"ok": False, "error": "Unauthorized"}, 403)
+                return
+            action = (data.get("action") or "list").strip().lower()
+            if action == "add":
+                ch = add_or_update_promo_channel(
+                    data.get("channel_username", ""),
+                    data.get("channel_title", ""),
+                    data.get("channel_description", ""),
+                    custom_code=data.get("code")
+                )
+                self.send_json({"ok": True, "channel": ch, "channels": get_all_promo_channels()})
+                return
+            elif action in ("pause", "deactivate"):
+                ok = deactivate_promo_channel(data.get("code", ""))
+                self.send_json({"ok": ok, "channels": get_all_promo_channels()})
+                return
+            elif action in ("resume", "activate"):
+                ok = activate_promo_channel(data.get("code", ""))
+                self.send_json({"ok": ok, "channels": get_all_promo_channels()})
+                return
+            elif action == "delete":
+                ok = delete_promo_channel_permanently(data.get("code", ""))
+                self.send_json({"ok": ok, "channels": get_all_promo_channels()})
+                return
+            else:
+                self.send_json({"ok": True, "channels": get_all_promo_channels()})
+                return
+
         raw_uname = data.get("username", "") or data.get("tg_user", "") or data.get("user", "")
         tg_id = int(data.get("tg_id", 0)) if data.get("tg_id") else None
         uname, tg_id = resolve_canonical_username(raw_uname, tg_id)
@@ -2964,20 +3441,21 @@ def main():
     print("💑 Запуск сервера «Двое» (Two Couple App)")
     print(f"📍 Порт: {PORT}")
     print(f"📁 Public: {PUBLIC_DIR}")
-    print(f"🤖 Бот: @{BOT_USERNAME}")
+    print(f"🤖 Бот: @{BOT_USERNAME} (polling={'disabled' if DISABLE_BOT_POLLING else 'enabled'})")
     print("=" * 60)
 
-    # Spawn Telegram Bot Polling Thread
-    t_bot = threading.Thread(target=telegram_polling_worker, daemon=True)
-    t_bot.start()
+    if not DISABLE_BOT_POLLING:
+        # Spawn Telegram Bot Polling Thread
+        t_bot = threading.Thread(target=telegram_polling_worker, daemon=True)
+        t_bot.start()
 
-    # Spawn Menu Button Syncer Thread
-    t_menu = threading.Thread(target=update_menu_button_periodically, daemon=True)
-    t_menu.start()
+        # Spawn Menu Button Syncer Thread
+        t_menu = threading.Thread(target=update_menu_button_periodically, daemon=True)
+        t_menu.start()
 
-    # Spawn Keep-Alive Worker for Render
-    t_keepalive = threading.Thread(target=keep_alive_worker, daemon=True)
-    t_keepalive.start()
+        # Spawn Keep-Alive Worker for Render
+        t_keepalive = threading.Thread(target=keep_alive_worker, daemon=True)
+        t_keepalive.start()
 
     # Start HTTP Server
     server = ThreadingHTTPServer(("0.0.0.0", PORT), DvoeHTTPHandler)
