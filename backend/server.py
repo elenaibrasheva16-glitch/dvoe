@@ -489,10 +489,8 @@ def tg_send_photo(chat_id: int, photo_path: str, caption: str, reply_markup: dic
         "caption": caption,
         "parse_mode": "HTML",
     }
-    if reply_markup is not None:
-        data["reply_markup"] = json.dumps(reply_markup)
-    else:
-        data["reply_markup"] = json.dumps(get_main_reply_keyboard())
+    if effective_markup:
+        data["reply_markup"] = json.dumps(effective_markup)
     proxies = None
     if os.environ.get("HTTP_PROXY"):
         proxies = {
@@ -666,6 +664,19 @@ def ensure_user(username: str, display_name: str = "", tg_id: int = None, photo_
     existing_photo = ex["photo_url"] if (ex and ex["photo_url"]) else ""
     if existing_photo and existing_photo.startswith("/uploads/"):
         disk_f = os.path.join(PUBLIC_DIR, existing_photo.lstrip("/"))
+        if not (os.path.exists(disk_f) and os.path.getsize(disk_f) > 0):
+            try:
+                fname = os.path.basename(disk_f)
+                with db_lock:
+                    conn = get_db()
+                    uf_row = conn.execute("SELECT content FROM uploaded_files WHERE filename = ?", (fname,)).fetchone()
+                    conn.close()
+                if uf_row and uf_row["content"]:
+                    os.makedirs(os.path.dirname(disk_f), exist_ok=True)
+                    with open(disk_f, "wb") as f_res:
+                        f_res.write(uf_row["content"])
+            except Exception:
+                pass
         if os.path.exists(disk_f) and os.path.getsize(disk_f) > 0:
             local_photo = existing_photo
 
@@ -705,8 +716,10 @@ def ensure_user(username: str, display_name: str = "", tg_id: int = None, photo_
                             "UPDATE users SET partner_username = ?, paired_at = ?, anniversary_date = ? WHERE username = ?",
                             (p_uname, p_at, a_date, username)
                         )
+                        cur.execute("UPDATE users SET partner_username = ? WHERE partner_username = ?", (username, placeholder_uname))
+                    elif row_existing["partner_username"] and p_uname and row_existing["partner_username"] != p_uname:
+                        cur.execute("UPDATE users SET partner_username = NULL, anniversary_date = '', paired_at = 0 WHERE partner_username = ?", (placeholder_uname,))
                     cur.execute("DELETE FROM users WHERE username = ?", (placeholder_uname,))
-                    cur.execute("UPDATE users SET partner_username = ? WHERE partner_username = ?", (username, placeholder_uname))
                     cur.execute("UPDATE support_tickets SET username = ? WHERE username = ?", (username, placeholder_uname))
                     cur.execute("UPDATE pair_requests SET from_username = ? WHERE from_username = ?", (username, placeholder_uname))
                     cur.execute("UPDATE pair_requests SET to_username = ? WHERE to_username = ?", (username, placeholder_uname))
@@ -1165,7 +1178,7 @@ def telegram_polling_worker():
                             tg_send_message(
                                 user_dest_id,
                                 f"📬 <b>Ответ разработчика «Двое»:</b>\n\n{text}\n\n<i>Приятного пользования приложением! 💕</i>",
-                                reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": webapp_url}}]]}
+                                reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(user_dest_id)}}]]}
                             )
                             tg_send_message(ADMIN_TG_ID, f"✅ Ответ успешно передан пользователю (TG ID: <code>{user_dest_id}</code>).")
                             continue
@@ -1174,9 +1187,13 @@ def telegram_polling_worker():
                     in_support = False
                     with db_lock:
                         conn = get_db()
-                        sess = conn.execute("SELECT state FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
+                        sess = conn.execute("SELECT state, updated_at FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
                         if sess and sess["state"] == "awaiting_ticket":
-                            in_support = True
+                            if time.time() - (sess["updated_at"] or 0) < 900:
+                                in_support = True
+                            else:
+                                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                                conn.commit()
                         conn.close()
 
                     if in_support and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
@@ -1222,9 +1239,13 @@ def telegram_polling_worker():
                     in_pair_session = False
                     with db_lock:
                         conn = get_db()
-                        psess = conn.execute("SELECT state FROM pair_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
+                        psess = conn.execute("SELECT state, updated_at FROM pair_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
                         if psess and psess["state"] == "awaiting_code":
-                            in_pair_session = True
+                            if time.time() - (psess["updated_at"] or 0) < 900:
+                                in_pair_session = True
+                            else:
+                                conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
+                                conn.commit()
                         conn.close()
 
                     if in_pair_session and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
@@ -1287,17 +1308,19 @@ def telegram_polling_worker():
 
                         paired = pair_users(uname, target_uname)
                         if paired:
+                            target_display = (target.get("display_name") or target_uname).strip()
+                            caller_display = (first_name or uname).strip()
                             tg_send_message(
                                 chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target['display_name'])}</b> 💕\n\n"
+                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
                                 "Откройте приложение «Двое», чтобы видеть общий счётчик и настроение партнёра!",
                                 reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
                                 uname=uname
                             )
-                            if target["tg_id"]:
+                            if target.get("tg_id"):
                                 tg_send_message(
                                     target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(first_name)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
                                     reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
                                     uname=target_uname
                                 )
@@ -1375,7 +1398,8 @@ def telegram_polling_worker():
                                     f"💕 <b>У вас уже привязана пара!</b>\n\n"
                                     f"Ваша вторая половинка: <b>{partner_name}</b> (@{partner.get('username')}).\n\n"
                                     "Если вы хотите подключить другого человека, сначала отвяжите текущую пару с помощью команды /unlink.",
-                                    reply_markup=get_main_reply_keyboard()
+                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                    uname=uname
                                 )
                                 continue
 
@@ -1435,17 +1459,19 @@ def telegram_polling_worker():
 
                         paired = pair_users(uname, target_uname)
                         if paired:
+                            target_display = (target.get("display_name") or target_uname).strip()
+                            caller_display = (first_name or uname).strip()
                             tg_send_message(
                                 chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target['display_name'])}</b> 💕\n\n"
+                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
                                 "Откройте приложение, чтобы увидеть ваш общий счётчик времени и настроение партнёра!",
                                 reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
                                 uname=uname
                             )
-                            if target["tg_id"]:
+                            if target.get("tg_id"):
                                 tg_send_message(
                                     target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(first_name)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
                                     reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
                                     uname=target_uname
                                 )
@@ -1501,10 +1527,11 @@ def telegram_polling_worker():
                                 else:
                                     if pair_users(uname, target_uname):
                                         paired_now = True
-                                        if target["tg_id"]:
+                                        if target.get("tg_id"):
+                                            caller_name = (first_name or uname).strip()
                                             tg_send_message(
                                                 target["tg_id"],
-                                                f"🎉 <b>{html.escape(first_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
+                                                f"🎉 <b>{html.escape(caller_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
                                                 reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
                                                 uname=target_uname
                                             )
@@ -1541,11 +1568,12 @@ def telegram_polling_worker():
                             [{"text": "📖 О приложении", "callback_data": "about_app"}],
                             [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
                         ]
-                        tg_send_photo(chat_id, BANNER_IMAGE_PATH, welcome, reply_markup={"inline_keyboard": kb})
+                        tg_send_photo(chat_id, BANNER_IMAGE_PATH, welcome, reply_markup={"inline_keyboard": kb}, uname=uname)
                         tg_send_message(
                             chat_id,
                             "💫 <b>Быстрое меню закреплено внизу экрана:</b> вы можете в любой момент отправить знак внимания или проверить статус!",
-                            reply_markup=get_main_reply_keyboard()
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
                         )
                         continue
 
@@ -1571,7 +1599,8 @@ def telegram_polling_worker():
                                 chat_id,
                                 "💔 <b>У вас пока нет привязанного партнёра.</b>\n\n"
                                 "Используйте команду /pair или передайте ваш код для подключения второй половинке.",
-                                reply_markup=get_main_reply_keyboard()
+                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                uname=uname
                             )
                         else:
                             sender_name = html.escape(((u_row["display_name"] if u_row else None) or "").strip() or f"@{uname}")
@@ -1580,18 +1609,21 @@ def telegram_polling_worker():
                                 tg_send_message(
                                     p_row["tg_id"],
                                     f"❤️ <b>{sender_name} думает о вас и шлёт вам знак внимания!</b> 💕",
-                                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": webapp_url}}]]}
+                                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row['tg_id'], p_uname)}}]]},
+                                    uname=p_uname
                                 )
                                 tg_send_message(
                                     chat_id,
                                     f"❤️ <b>Знак внимания отправлен для {partner_name}!</b> 💕\n<i>Партнёр получит мгновенное уведомление в Telegram.</i>",
-                                    reply_markup=get_main_reply_keyboard()
+                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                    uname=uname
                                 )
                             else:
                                 tg_send_message(
                                     chat_id,
                                     f"❤️ <b>Знак внимания сохранён для {partner_name}!</b> 💕\n<i>Партнёр увидит его при входе в приложение.</i>",
-                                    reply_markup=get_main_reply_keyboard()
+                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                                    uname=uname
                                 )
                         continue
 
@@ -1641,7 +1673,8 @@ def telegram_polling_worker():
                         tg_send_message(
                             chat_id,
                             status_text,
-                            reply_markup=get_main_reply_keyboard()
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
                         )
                         continue
 
@@ -1650,7 +1683,8 @@ def telegram_polling_worker():
                         tg_send_message(
                             chat_id,
                             "✨ Нажмите кнопку ниже, чтобы открыть приложение «Двое» 💕",
-                            reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]]}
+                            reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]]},
+                            uname=uname
                         )
                         continue
 
@@ -1680,12 +1714,14 @@ def telegram_polling_worker():
                             "• <b>💬 Связь с разработчиком</b> — поддержка и предложения\n"
                             "• <b>💌 Послать знак внимания</b> — отправить мгновенное уведомление половинке\n"
                             "• <b>ℹ️ Мой статус</b> — проверить дни вместе и статус партнёра",
-                            reply_markup={"inline_keyboard": menu_kb}
+                            reply_markup={"inline_keyboard": menu_kb},
+                            uname=uname
                         )
                         tg_send_message(
                             chat_id,
                             "💫 <b>Быстрое меню закреплено внизу экрана</b> для доступа в любой момент:",
-                            reply_markup=get_main_reply_keyboard()
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
                         )
                         continue
 
@@ -1696,7 +1732,7 @@ def telegram_polling_worker():
                         share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
                         share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
                         about_kb = [
-                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": webapp_url}}],
+                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
                             [
                                 {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
                                 {"text": "📤 Пригласить партнёра", "url": share_url}
@@ -1706,7 +1742,8 @@ def telegram_polling_worker():
                         tg_send_message(
                             chat_id,
                             ABOUT_APP_TEXT,
-                            reply_markup={"inline_keyboard": about_kb}
+                            reply_markup={"inline_keyboard": about_kb},
+                            uname=uname
                         )
                         continue
 
@@ -1727,7 +1764,8 @@ def telegram_polling_worker():
                             reply_markup={"inline_keyboard": [
                                 [{"text": "📤 Поделиться ссылкой", "url": share_url}],
                                 [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]
-                            ]}
+                            ]},
+                            uname=uname
                         )
                         continue
 
@@ -1743,7 +1781,8 @@ def telegram_polling_worker():
                             "💬 <b>Связь с разработчиком</b>\n\n"
                             "Напишите ваш вопрос, пожелание или предложение одним сообщением — "
                             "оно сразу будет передано разработчику:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]}
+                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]], "resize_keyboard": True},
+                            uname=uname
                         )
                         continue
 
@@ -1755,7 +1794,8 @@ def telegram_polling_worker():
                     tg_send_message(
                         chat_id,
                         f"✨ <b>Приложение «Двое» 💕</b>\n\n🔗 Ваш код пары: <code>{inv_code}</code>\n\nИспользуйте кнопки меню внизу для быстрого доступа!",
-                        reply_markup=get_main_reply_keyboard()
+                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                        uname=uname
                     )
 
         except Exception as e:
@@ -1892,12 +1932,11 @@ class DvoeHTTPHandler(SimpleHTTPRequestHandler):
 
         # 0. Update Profile / Display Name: /api/profile or /api/user/name
         if path in ("/api/profile", "/api/user/name", "/api/profile/name"):
-            display_name = (data.get("displayName") or data.get("display_name") or data.get("name") or "").strip()
+            raw_dname = data.get("displayName") or data.get("display_name") or data.get("name") or ""
+            display_name = normalize_display_name(raw_dname)
             if not display_name:
                 self.send_json({"ok": False, "error": "Имя не может быть пустым"}, 400)
                 return
-            if len(display_name) > 40:
-                display_name = display_name[:40]
             now = time.time()
             with db_lock:
                 conn = get_db()

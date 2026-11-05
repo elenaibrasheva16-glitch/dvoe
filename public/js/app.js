@@ -44,18 +44,36 @@
     }
     if (qUser) {
       const u = qUser.toLowerCase().replace('@', '');
-      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      try {
+        const oldU = localStorage.getItem('dvoe_tg_user');
+        if (oldU && oldU !== u) {
+          localStorage.removeItem('dvoe_tg_id');
+        }
+        localStorage.setItem('dvoe_tg_user', u);
+      } catch (e) {}
       return u;
     }
 
     if (tg?.initDataUnsafe?.user?.username) {
       const u = tg.initDataUnsafe.user.username.toLowerCase();
-      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      try {
+        const oldU = localStorage.getItem('dvoe_tg_user');
+        if (oldU && oldU !== u) {
+          localStorage.removeItem('dvoe_tg_id');
+        }
+        localStorage.setItem('dvoe_tg_user', u);
+      } catch (e) {}
       return u;
     }
     if (tg?.initDataUnsafe?.user?.id) {
       const u = `user_${tg.initDataUnsafe.user.id}`;
-      try { localStorage.setItem('dvoe_tg_user', u); } catch (e) {}
+      try {
+        const oldU = localStorage.getItem('dvoe_tg_user');
+        if (oldU && oldU !== u) {
+          localStorage.removeItem('dvoe_tg_id');
+        }
+        localStorage.setItem('dvoe_tg_user', u);
+      } catch (e) {}
       return u;
     }
 
@@ -68,7 +86,10 @@
 
     // Unique guest identifier fallback for non-telegram / standalone browsers
     const guestId = `guest_${Math.random().toString(36).substring(2, 10)}`;
-    try { localStorage.setItem('dvoe_tg_user', guestId); } catch (e) {}
+    try {
+      localStorage.removeItem('dvoe_tg_id');
+      localStorage.setItem('dvoe_tg_user', guestId);
+    } catch (e) {}
     return guestId;
   }
   const detectCurrentUser = resolveCurrentUser;
@@ -100,6 +121,14 @@
       return tid;
     }
     try {
+      const savedUser = localStorage.getItem('dvoe_tg_user');
+      if (savedUser && (savedUser.startsWith('guest_') || savedUser.startsWith('user_'))) {
+        if (savedUser.startsWith('user_')) {
+          const parsed = parseInt(savedUser.replace('user_', ''), 10);
+          if (parsed && !isNaN(parsed)) return parsed;
+        }
+        return 0;
+      }
       const savedId = parseInt(localStorage.getItem('dvoe_tg_id'), 10);
       if (savedId && !isNaN(savedId)) return savedId;
     } catch (e) {}

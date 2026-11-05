@@ -74,10 +74,22 @@ class TestDvoeBackend(unittest.TestCase):
             # Wipe any test users and data created during this test run
             cur.execute("DELETE FROM users WHERE username NOT IN ('ksjjfnnn', 'adamlanda')")
             cur.execute("DELETE FROM pair_requests WHERE from_username NOT IN ('ksjjfnnn', 'adamlanda') AND to_username NOT IN ('ksjjfnnn', 'adamlanda')")
-            cur.execute("DELETE FROM support_tickets WHERE username NOT IN ('ksjjfnnn', 'adamlanda')")
+            cur.execute("DELETE FROM support_tickets WHERE username NOT IN ('ksjjfnnn', 'adamlanda') OR message LIKE 'Очень нравится%'")
+            cur.execute("DELETE FROM support_sessions WHERE tg_id = 2034621049")
             cur.execute("DELETE FROM care_logs WHERE couple_key NOT LIKE '%ksjjfnnn%' AND couple_key NOT LIKE '%adamlanda%'")
+            cur.execute("DELETE FROM uploaded_files WHERE filename LIKE 'test_%' OR filename LIKE 'avatar_avatar_%' OR filename LIKE 'ext_src_%' OR filename LIKE 'avatar_test_%'")
             conn.commit()
             conn.close()
+
+            # Clean disk test uploads
+            uploads_dir = os.path.join(BASE_DIR, "public", "uploads")
+            if os.path.exists(uploads_dir):
+                for f in os.listdir(uploads_dir):
+                    if f.startswith(("test_", "avatar_test_", "avatar_avatar_", "ext_src_")):
+                        try:
+                            os.remove(os.path.join(uploads_dir, f))
+                        except Exception:
+                            pass
 
     def test_01_health_and_info(self):
         """Verify health check endpoint returns 200 and correct app metadata."""

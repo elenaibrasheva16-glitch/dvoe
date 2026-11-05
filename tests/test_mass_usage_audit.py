@@ -45,10 +45,22 @@ class TestMassUsageAudit(unittest.TestCase):
                 conn = sqlite3.connect(db_path)
                 conn.execute("DELETE FROM users WHERE username NOT IN ('ksjjfnnn', 'adamlanda')")
                 conn.execute("DELETE FROM pair_requests WHERE from_username NOT IN ('ksjjfnnn', 'adamlanda') AND to_username NOT IN ('ksjjfnnn', 'adamlanda')")
-                conn.execute("DELETE FROM support_tickets WHERE username NOT IN ('ksjjfnnn', 'adamlanda')")
+                conn.execute("DELETE FROM support_tickets WHERE username NOT IN ('ksjjfnnn', 'adamlanda') OR message LIKE 'Очень нравится%'")
+                conn.execute("DELETE FROM support_sessions WHERE tg_id = 2034621049")
                 conn.execute("DELETE FROM care_logs WHERE couple_key NOT LIKE '%ksjjfnnn%' AND couple_key NOT LIKE '%adamlanda%'")
+                conn.execute("DELETE FROM uploaded_files WHERE filename LIKE 'test_%' OR filename LIKE 'avatar_avatar_%' OR filename LIKE 'ext_src_%' OR filename LIKE 'avatar_test_%' OR filename LIKE 'user_%'")
                 conn.commit()
                 conn.close()
+
+                # Clean disk test uploads
+                uploads_dir = os.path.join(base_dir, "public", "uploads")
+                if os.path.exists(uploads_dir):
+                    for f in os.listdir(uploads_dir):
+                        if f.startswith(("test_", "avatar_test_", "avatar_avatar_", "ext_src_", "user_")):
+                            try:
+                                os.remove(os.path.join(uploads_dir, f))
+                            except Exception:
+                                pass
         except Exception:
             pass
 
