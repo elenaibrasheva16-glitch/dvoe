@@ -13,11 +13,11 @@ echo "🚀 EXECUTING MASTER TEST SUITE: «ДВОЕ» (TWO COUPLE APP)"
 echo "================================================================================"
 
 echo ""
-echo ">>> [1/3] Running Backend & E2E Integration Test Suite..."
+echo ">>> [1/4] Running Backend & E2E Integration Test Suite..."
 python3 tests/test_dvoe_suite.py
 
 echo ""
-echo ">>> [2/3] Running Production Mass Usage & Concurrency Audit..."
+echo ">>> [2/4] Running Production Mass Usage & Concurrency Audit..."
 python3 tests/test_mass_usage_audit.py
 
 echo ""

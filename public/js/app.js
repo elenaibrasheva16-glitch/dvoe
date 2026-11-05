@@ -717,12 +717,16 @@
     if (titleEl) titleEl.textContent = promoPartner.channel_title || promoPartner.channel_username;
     if (descEl) descEl.textContent = promoPartner.channel_description || 'Рекомендуемый канал';
     if (linkEl) {
-      const rawU = (promoPartner.channel_username || '').replace(/^@/, '');
-      linkEl.href = `https://t.me/${rawU}`;
+      let targetUrl = (promoPartner.channel_username || '').trim();
+      if (!/^https?:\/\//i.test(targetUrl)) {
+        const cleanU = targetUrl.replace(/^@/, '').trim();
+        targetUrl = cleanU ? `https://t.me/${cleanU}` : '#';
+      }
+      linkEl.href = targetUrl;
       linkEl.onclick = (e) => {
-        if (window.Telegram && Telegram.WebApp && typeof Telegram.WebApp.openTelegramLink === 'function') {
+        if (targetUrl.startsWith('https://t.me/') && window.Telegram && Telegram.WebApp && typeof Telegram.WebApp.openTelegramLink === 'function') {
           e.preventDefault();
-          Telegram.WebApp.openTelegramLink(`https://t.me/${rawU}`);
+          Telegram.WebApp.openTelegramLink(targetUrl);
         }
       };
     }

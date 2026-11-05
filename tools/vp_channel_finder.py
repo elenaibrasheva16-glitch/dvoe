@@ -63,7 +63,7 @@ RESTRICTED_KEYWORDS = [
 
 OUTREACH_TEMPLATES = {
     "template_1_dm": (
-        "Привет! 👋 Меня зовут разработчик приложения «Двое» (уютное мини-приложение для любящих пар прямо в Telegram).\n\n"
+        "Привет! 👋 Я разработчик приложения «Двое» (уютное мини-приложение для любящих пар прямо в Telegram).\n\n"
         "Очень нравится ваш канал «{channel_title}» — классная атмосфера и живая аудитория! 🤍\n\n"
         "Хотел предложить вам честный взаимный пиар (ВП / кросс-промо):\n"
         "1️⃣ Вы размещаете эстетичный пост про «Двое» со своей персональной ссылкой: https://t.me/ChibiLovePara_bot?start=vp_{channel_code}\n"
@@ -165,12 +165,47 @@ def main():
     parser.add_argument("--title", type=str, default="Любовь и Нежность", help="Channel title")
     parser.add_argument("--niche", type=str, default="relations_love", help="Niche key")
     parser.add_argument("--audit-text", type=str, help="Audit arbitrary text for privacy leaks")
+    parser.add_argument("--bio", type=str, help="Channel bio/description text to extract admin and bot contacts")
+    parser.add_argument("--search", action="store_true", help="Generate Telegram deep search queries for target niche")
     parser.add_argument("--safety", action="store_true", help="Print anti-spam guidelines")
 
     args = parser.parse_args()
 
     if args.safety:
         print_safety_protocol()
+        return
+
+    if args.search:
+        niche_data = NICHES.get(args.niche, NICHES["relations_love"])
+        print(f"\n🔍 ПОИСКОВЫЕ ССЫЛКИ ДЛЯ НИШИ: {niche_data['title']}\n")
+        for q in niche_data["search_queries"]:
+            encoded = re.sub(r"\s+", "+", q.strip())
+            print(f"• Запрос: \"{q}\"")
+            print(f"  👉 tg://search?query={encoded}")
+            print(f"  👉 https://t.me/s/{encoded}\n")
+        return
+
+    if args.bio:
+        contacts = extract_contacts_from_bio(args.bio)
+        print("\n🔍 ИЗВЛЕЧЁННЫЕ КОНТАКТЫ ИЗ ОПИСАНИЯ КАНАЛА:")
+        print(f"👤 Администраторы (ЛС): {', '.join(contacts['admins']) if contacts['admins'] else 'не найдены'}")
+        print(f"🤖 Боты обратной связи: {', '.join(contacts['bots']) if contacts['bots'] else 'не найдены'}\n")
+        if contacts["admins"]:
+            chosen_ch = contacts["admins"][0]
+            pack = generate_outreach_pack(chosen_ch, args.title, args.niche)
+            print(f"📩 Рекомендуемое сообщение в ЛС ({chosen_ch}):\n")
+            print(pack["template_1_dm"]["text"])
+            print()
+        elif contacts["bots"]:
+            chosen_bot = contacts["bots"][0]
+            pack = generate_outreach_pack(chosen_bot, args.title, args.niche)
+            print(f"📩 Рекомендуемое сообщение в бота предложки ({chosen_bot}):\n")
+            print(pack["template_2_bot"]["text"])
+            print()
+        else:
+            print("💡 Контактов в описании не указано. Рекомендуется использовать Шаблон №3 (комментарий под постом)!")
+            print(OUTREACH_TEMPLATES["template_3_comment"])
+        print()
         return
 
     if args.list_niches:

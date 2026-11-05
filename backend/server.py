@@ -350,12 +350,12 @@ def get_all_promo_channels():
 def add_or_update_promo_channel(username: str, title: str, description: str = "", custom_code: str = None) -> dict:
     """Adds or updates a promo channel."""
     clean_u = username.strip()
-    if clean_u.startswith("https://t.me/"):
-        clean_u = "@" + clean_u[len("https://t.me/"):]
-    if not clean_u.startswith("@"):
-        clean_u = f"@{clean_u}"
+    clean_u = re.sub(r"^https?://(?:www\.)?(?:t\.me|telegram\.me)/", "", clean_u, flags=re.IGNORECASE)
+    clean_u = re.sub(r"^(?:www\.)?(?:t\.me|telegram\.me)/", "", clean_u, flags=re.IGNORECASE)
+    clean_u = clean_u.lstrip("@").strip()
+    display_u = f"@{clean_u}" if clean_u else "@channel"
 
-    code = custom_code or normalize_promo_code(clean_u.lstrip("@"))
+    code = custom_code or normalize_promo_code(clean_u)
     if not code:
         code = f"ch_{secrets.token_hex(3)}"
 
@@ -367,13 +367,13 @@ def add_or_update_promo_channel(username: str, title: str, description: str = ""
         if existing:
             cur.execute(
                 "UPDATE promo_channels SET channel_username = ?, channel_title = ?, channel_description = ?, active = 1 WHERE code = ?",
-                (clean_u, title.strip(), description.strip(), code)
+                (display_u, title.strip(), description.strip(), code)
             )
             clicks = existing["clicks"]
         else:
             cur.execute(
                 "INSERT INTO promo_channels (code, channel_username, channel_title, channel_description, clicks, active, created_at) VALUES (?, ?, ?, ?, 0, 1, ?)",
-                (code, clean_u, title.strip(), description.strip(), now)
+                (code, display_u, title.strip(), description.strip(), now)
             )
             clicks = 0
         conn.commit()
@@ -381,7 +381,7 @@ def add_or_update_promo_channel(username: str, title: str, description: str = ""
 
     return {
         "code": code,
-        "channel_username": clean_u,
+        "channel_username": display_u,
         "channel_title": title.strip(),
         "channel_description": description.strip(),
         "clicks": clicks,
@@ -390,28 +390,69 @@ def add_or_update_promo_channel(username: str, title: str, description: str = ""
 
 
 def deactivate_promo_channel(code: str) -> bool:
-    """Deactivates a promo channel by code."""
+    """Deactivates a promo channel by code or channel username."""
     c = normalize_promo_code(code)
     with db_lock:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("UPDATE promo_channels SET active = 0 WHERE LOWER(code) = LOWER(?)", (c,))
         changed = cur.rowcount > 0
+        if not changed:
+            clean_u = code.strip().lstrip("@").lower()
+            cur.execute("UPDATE promo_channels SET active = 0 WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (clean_u,))
+            changed = cur.rowcount > 0
         conn.commit()
         conn.close()
     return changed
 
 
-def get_promo_creative_text(channel_code: str = "partner") -> str:
+def get_promo_creative_text(channel_code: str = "partner", variant: str = "a") -> str:
+    """Returns promotional post creative text for channels.
+    Supports 3 niches:
+    - variant 'a' (default): Emotional & aesthetic (love, quotes, female blogs)
+    - variant 'b': Interactive & viral with mood drama / 'Обиделась' & live counter
+    - variant 'c': Short native format (lifestyle, student diaries)
+    All variants are completely free of raw HTML tags so they are 100% clean when copied into Telegram.
+    """
     link = f"https://t.me/{BOT_USERNAME}?start=vp_{channel_code}"
-    return (
-        "Устали считать дни отношений на калькуляторе или гадать «почему она сегодня грустная»? 🥺💕\n\n"
-        "Нашли безумно милое приложение для пар прямо в Telegram — «Двое»:\n\n"
-        "⏳ <b>Живой счётчик отношений:</b> считает в реальном времени сколько вы вместе — вплоть до секунд (годы, месяцы, дни, часы, секунды!)\n"
-        "💭 <b>Синхронизация настроения:</b> делитесь статусами с милыми пояснениями (например: <i>«Скучаю, скорее бы обнять после пар»</i>). Партнёр сразу видит и шлёт сердечки в один клик ❤️\n"
-        "🖼 <b>Парные профили 1:1</b> и уютная атмосфера без лишнего шума и рекламы.\n\n"
-        f"🔗 <b>Попробуйте вместе со своей половинкой:</b>\n👉 {link}"
-    )
+    var = (variant or "a").lower().strip()
+
+    if var in ("b", "viral", "2"):
+        return (
+            "Конец эпохи «Ой, всё» и «Догадайся сам(-а)» 😅💔\n\n"
+            "Знакома ситуация: настроение на нуле, а на вопрос «Что случилось?» в ответ тишина? В Telegram появилось гениальное решение для пар — мини-приложение «Двое».\n\n"
+            "Главная фишка — статус настроения с обязательным пояснением!\n"
+            "Если ставишь «😒 Обиделась» или «😴 Устала», бот мягко предлагает написать, что именно произошло (например: «Ты забыл пожелать доброго утра» или «Устала на парах, хочу вкусняшек»). В итоге никакой драмы на пустом месте — партнёр сразу всё понимает и шлёт поддержку! ❤️\n\n"
+            "А ещё:\n"
+            "⏳ Сверхточный счётчик отношений: считает вплоть до секунд годы, месяцы, дни, часы и секунды вместе\n"
+            "💌 Мгновенные знаки внимания прямо в Telegram\n"
+            "🔒 Полная приватность без посторонних глаз\n\n"
+            "Попробуйте подключить свою пару — это бесплатно и очень мило:\n"
+            f"👉 {link}"
+        )
+    elif var in ("c", "short", "native", "3"):
+        return (
+            "Находка для тех, кто в отношениях 🤍\n\n"
+            "Если вы до сих пор считаете дни отношений в калькуляторе или заметках — держите мини-апп «Двое» прямо внутри Telegram.\n\n"
+            "Он считает секунда в секунду, сколько вы вместе (живой счётчик отношений!), синхронизирует настроение и позволяет отправлять сердечки в один клик, когда скучаете 💕\n\n"
+            "Работает моментально, без скачивания лишних приложений на телефон.\n\n"
+            "Запустить для вашей пары:\n"
+            f"👉 {link}"
+        )
+    else:
+        # Default: Variant A (Emotional / Aesthetic)
+        return (
+            "Как давно вы говорили своей второй половинке, насколько сильно её любите? 🥺💕\n\n"
+            "Иногда в суете учёбы и работы мы забываем о самом тёплом. Нашли невероятно уютное мини-приложение для двоих прямо в Telegram — «Двое».\n\n"
+            "Что здесь можно делать:\n"
+            "⏳ Счётчик отношений: в реальном времени видеть, сколько вы вместе — вплоть до секунд! (1 год, 4 месяца, 12 дней...)\n"
+            "💭 Делиться настроением и писать милые записки («Скучаю, скорее бы обнять после пар»), чтобы партнёр чувствовал тепло даже на расстоянии\n"
+            "💌 Отправлять мгновенные сердечки и знаки внимания в один клик\n"
+            "🖼 Устанавливать парные фото профилей 1:1\n\n"
+            "Никакой навязчивой рекламы, спама и платных подписок — только ваше тихое приватное пространство для двоих 🤍\n\n"
+            "🔗 Подключить вашу половинку:\n"
+            f"👉 {link}"
+        )
 
 
 def normalize_username(u: str) -> str:
@@ -1332,19 +1373,87 @@ def telegram_polling_worker():
                             reply_markup={"inline_keyboard": about_kb},
                             uname=uname
                         )
-                    elif data and data.startswith("vp_get_creative"):
+                    elif data and (data.startswith("vp_get_creative") or data.startswith("vp_creative:")):
                         code_arg = "partner"
-                        if ":" in data:
+                        variant_arg = "a"
+                        if data.startswith("vp_creative:"):
+                            parts_c = data.split(":")
+                            if len(parts_c) > 1 and parts_c[1]:
+                                code_arg = parts_c[1]
+                            if len(parts_c) > 2 and parts_c[2]:
+                                variant_arg = parts_c[2]
+                        elif ":" in data:
                             code_arg = data.split(":", 1)[1]
-                        creative_text = (
-                            "✨ <b>Готовый рекламный пост для вашего канала:</b>\n\n"
-                            f"<code>{html.escape(get_promo_creative_text(code_arg))}</code>\n\n"
-                            "<i>👆 Нажмите на текст, чтобы скопировать. Опубликуйте его в своём канале вместе с прикреплённым промо-баннером!</i>"
+
+                        var_titles = {
+                            "a": "Вариант А (Эмоциональный / Эстетичный 💕)",
+                            "b": "Вариант Б (Вирусный / Обидки 😒)",
+                            "c": "Вариант В (Короткий нативный 🤍)"
+                        }
+                        cur_title = var_titles.get(variant_arg, "Вариант А")
+                        post_raw = get_promo_creative_text(code_arg, variant_arg)
+                        creative_msg = (
+                            f"✨ <b>Готовый рекламный пост — {cur_title}:</b>\n\n"
+                            f"<code>{html.escape(post_raw)}</code>\n\n"
+                            "<i>👆 Нажмите на серый блок выше, чтобы скопировать текст в один клик. "
+                            "Опубликуйте его в своём канале вместе с прикреплённым промо-баннером или скриншотами!</i>"
                         )
-                        if os.path.exists(PROMO_BANNER_PATH):
-                            tg_send_photo(chat_id, PROMO_BANNER_PATH, creative_text, uname=uname)
-                        else:
-                            tg_send_message(chat_id, creative_text, uname=uname)
+                        kb_creative = [
+                            [
+                                {"text": ("• " if variant_arg == "a" else "") + "💕 Вариант А", "callback_data": f"vp_creative:{code_arg}:a"},
+                                {"text": ("• " if variant_arg == "b" else "") + "😒 Вариант Б", "callback_data": f"vp_creative:{code_arg}:b"},
+                                {"text": ("• " if variant_arg == "c" else "") + "🤍 Вариант В", "callback_data": f"vp_creative:{code_arg}:c"}
+                            ],
+                            [{"text": "🖼 Скачать промо-скриншоты (2 шт.)", "callback_data": "vp_get_screens"}],
+                            [{"text": "🤝 Меню взаимопиара", "callback_data": "vp_menu"}]
+                        ]
+
+                        if data.startswith("vp_get_creative") and os.path.exists(PROMO_BANNER_PATH):
+                            banner_caption = (
+                                "🎨 <b>Широкоформатный промо-баннер для поста (1280×720)</b> 💕\n"
+                                "<i>Используйте этот баннер вместе с готовым текстом рекламного поста ниже:</i>"
+                            )
+                            tg_send_photo(chat_id, PROMO_BANNER_PATH, banner_caption, uname=uname)
+
+                        tg_send_message(chat_id, creative_msg, reply_markup={"inline_keyboard": kb_creative}, uname=uname)
+                    elif data == "vp_get_screens":
+                        if os.path.exists(PROMO_SCREEN_1_PATH):
+                            tg_send_photo(
+                                chat_id,
+                                PROMO_SCREEN_1_PATH,
+                                "📱 <b>Главный экран «Двое»:</b> живой счётчик отношений до секунд и статус пары (Максим & Алина) 💕",
+                                uname=uname
+                            )
+                        if os.path.exists(PROMO_SCREEN_2_PATH):
+                            tg_send_photo(
+                                chat_id,
+                                PROMO_SCREEN_2_PATH,
+                                "📱 <b>Выбор настроения:</b> статус с пояснением («Обиделась», «Скучаю») и быстрые реакции ❤️",
+                                reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый текст поста", "callback_data": "vp_get_creative:partner"}]]},
+                                uname=uname
+                            )
+                    elif data == "vp_menu":
+                        vp_info_msg = (
+                            "🤝 <b>Взаимный пиар и партнёрская программа «Двое» 💕</b>\n\n"
+                            "Мы открыты к честному сотрудничеству с уютными авторскими каналами (500–1200+ подписчиков):\n\n"
+                            "1️⃣ <b>Вы размещаете пост</b> о приложении «Двое» со своей персональной ссылкой.\n"
+                            "2️⃣ <b>Мы взамен рекомендуем ваш канал</b> тысячам наших пользователей — в боте и прямо в Mini App в карточке «Канал дня».\n"
+                            "3️⃣ <b>Честная статистика:</b> бот считает каждый реальный переход по вашей ссылке в реальном времени!\n\n"
+                            "<i>Готовы обменяться аудиторией? Нажмите «🤝 Подать заявку на ВП» ниже!</i>"
+                        )
+                        kb_menu = [
+                            [{"text": "📥 Получить готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
+                            [
+                                {"text": "💕 Вариант А", "callback_data": "vp_creative:partner:a"},
+                                {"text": "😒 Вариант Б", "callback_data": "vp_creative:partner:b"},
+                                {"text": "🤍 Вариант В", "callback_data": "vp_creative:partner:c"}
+                            ],
+                            [{"text": "🖼 Скачать скриншоты 1:1", "callback_data": "vp_get_screens"}],
+                            [{"text": "🤝 Подать заявку на ВП", "callback_data": "vp_apply_ticket"}],
+                            [{"text": "📊 Моя статистика", "callback_data": "vp_my_stats"}],
+                            [{"text": "✨ Канал-партнёр дня", "callback_data": "vp_show_partner"}]
+                        ]
+                        tg_send_message(chat_id, vp_info_msg, reply_markup={"inline_keyboard": kb_menu}, uname=uname)
                     elif data == "vp_my_stats":
                         matching = None
                         with db_lock:
@@ -1362,6 +1471,10 @@ def telegram_polling_worker():
                                 f"📌 <b>Код:</b> <code>{ch['code']}</code>\n"
                                 f"👥 <b>Уникальных переходов:</b> <b>{ch.get('clicks', 0)}</b>\n"
                                 f"🔗 <b>Ваша ссылка:</b>\nhttps://t.me/{BOT_USERNAME}?start=vp_{ch['code']}",
+                                reply_markup={"inline_keyboard": [
+                                    [{"text": "📥 Получить пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
+                                    [{"text": "🖼 Скачать скриншоты 1:1", "callback_data": "vp_get_screens"}]
+                                ]},
                                 uname=uname
                             )
                         else:
@@ -1370,6 +1483,7 @@ def telegram_polling_worker():
                                 "ℹ️ <b>У вас пока нет привязанного канала партнёра.</b>\n\n"
                                 "Если вы уже получили персональный код, введите команду: <code>/vp ваш_код</code>\n"
                                 "Или нажмите «🤝 Подать заявку на ВП», чтобы подключить ваш канал!",
+                                reply_markup={"inline_keyboard": [[{"text": "🤝 Подать заявку на ВП", "callback_data": "vp_apply_ticket"}]]},
                                 uname=uname
                             )
                     elif data == "vp_apply_ticket":
@@ -1391,18 +1505,19 @@ def telegram_polling_worker():
                         if partner_ch:
                             p_title = html.escape(partner_ch["channel_title"])
                             p_desc = html.escape(partner_ch["channel_description"])
+                            p_desc_block = f"<i>{p_desc}</i>\n\n" if p_desc else ""
                             p_u = partner_ch["channel_username"].lstrip("@")
                             tg_send_message(
                                 chat_id,
                                 f"✨ <b>Рекомендуемый канал-партнёр «Двое» 💕</b>\n\n"
                                 f"📢 <b><a href=\"https://t.me/{p_u}\">{p_title}</a></b>\n"
-                                f"<i>{p_desc}</i>\n\n"
+                                f"{p_desc_block}"
                                 f"👉 <a href=\"https://t.me/{p_u}\">Перейти в канал</a>",
                                 reply_markup={"inline_keyboard": [[{"text": f"📢 Открыть {p_title}", "url": f"https://t.me/{p_u}"}]]},
                                 uname=uname
                             )
                         else:
-                            tg_send_message(chat_id, "✨ В данный момент партнёрские каналы обновляются.", uname=uname)
+                            tg_send_message(chat_id, "✨ В данный момент список партнёров обновляется.", uname=uname)
                     continue
 
                 # Handle Messages
@@ -1710,7 +1825,13 @@ def telegram_polling_worker():
                                 "<i>Нажмите кнопку ниже, чтобы получить готовый рекламный пост с промо-баннером!</i>"
                             )
                             kb = [
-                                [{"text": "📥 Получить рекламный пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
+                                [{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
+                                [
+                                    {"text": "💕 Вариант А", "callback_data": f"vp_creative:{ch['code']}:a"},
+                                    {"text": "😒 Вариант Б", "callback_data": f"vp_creative:{ch['code']}:b"},
+                                    {"text": "🤍 Вариант В", "callback_data": f"vp_creative:{ch['code']}:c"}
+                                ],
+                                [{"text": "🖼 Скачать скриншоты 1:1", "callback_data": "vp_get_screens"}],
                                 [{"text": "✨ Рекомендуемый канал дня", "callback_data": "vp_show_partner"}],
                                 [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
                             ]
@@ -1725,6 +1846,12 @@ def telegram_polling_worker():
                             )
                             kb = [
                                 [{"text": "📥 Получить готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
+                                [
+                                    {"text": "💕 Вариант А", "callback_data": "vp_creative:partner:a"},
+                                    {"text": "😒 Вариант Б", "callback_data": "vp_creative:partner:b"},
+                                    {"text": "🤍 Вариант В", "callback_data": "vp_creative:partner:c"}
+                                ],
+                                [{"text": "🖼 Скачать скриншоты 1:1", "callback_data": "vp_get_screens"}],
                                 [{"text": "🤝 Подать заявку на ВП", "callback_data": "vp_apply_ticket"}],
                                 [{"text": "📊 Моя статистика", "callback_data": "vp_my_stats"}],
                                 [{"text": "✨ Канал-партнёр дня", "callback_data": "vp_show_partner"}]

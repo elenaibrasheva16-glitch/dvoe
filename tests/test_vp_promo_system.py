@@ -110,14 +110,35 @@ class TestVpPromoSystem(unittest.TestCase):
         self.assertEqual(row["active"], 0)
 
     def test_05_creative_text_generation(self):
-        text = get_promo_creative_text("test_channel")
-        self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text)
-        self.assertIn("«Двое»", text)
-        self.assertIn("счётчик отношений", text)
+        # 1. Variant A (default / aesthetic)
+        text_a = get_promo_creative_text("test_channel", "a")
+        self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text_a)
+        self.assertIn("«двое»", text_a.lower())
+        self.assertIn("счётчик отношений", text_a.lower())
+        # Ensure zero raw HTML tags so copied text doesn't show broken markup in Telegram
+        self.assertNotIn("<b>", text_a)
+        self.assertNotIn("<i>", text_a)
 
-        # Privacy verification: guarantee NO personal name or username in creative
-        for forbidden in ["danil", "ksjjfnnn", "adamlanda", "данил", "адам"]:
-            self.assertNotIn(forbidden, text.lower())
+        # 2. Variant B (viral / mood drama & 'Обиделась')
+        text_b = get_promo_creative_text("test_channel", "b")
+        self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text_b)
+        self.assertIn("«Двое»", text_b)
+        self.assertIn("Обиделась", text_b)
+        self.assertNotIn("<b>", text_b)
+        self.assertNotIn("<i>", text_b)
+
+        # 3. Variant C (short native)
+        text_c = get_promo_creative_text("test_channel", "c")
+        self.assertIn("https://t.me/ChibiLovePara_bot?start=vp_test_channel", text_c)
+        self.assertIn("«Двое»", text_c)
+        self.assertIn("Находка для тех, кто в отношениях", text_c)
+        self.assertNotIn("<b>", text_c)
+        self.assertNotIn("<i>", text_c)
+
+        # Privacy verification across all 3 variants: guarantee NO personal name or username in creatives
+        for txt in [text_a, text_b, text_c]:
+            for forbidden in ["danil", "ksjjfnnn", "adamlanda", "данил", "адам", "8565474570"]:
+                self.assertNotIn(forbidden, txt.lower())
 
     def test_06_http_api_endpoints(self):
         # Register an active test partner
@@ -162,6 +183,32 @@ class TestVpPromoSystem(unittest.TestCase):
         # Guarantee zero personal leaks
         for forbidden in ["danil", "ksjjfnnn", "adamlanda", "данил", "адам"]:
             self.assertNotIn(forbidden, content)
+
+    def test_09_channel_finder_bio_extraction(self):
+        from tools.vp_channel_finder import extract_contacts_from_bio, generate_outreach_pack
+        bio = "Наш канал о любви 💕 Связь с администратором: @love_manager и бот предложки https://t.me/love_feed_bot"
+        contacts = extract_contacts_from_bio(bio)
+        self.assertIn("@love_manager", contacts["admins"])
+        self.assertIn("@love_feed_bot", contacts["bots"])
+
+        pack = generate_outreach_pack("@love_manager", "Любовь и Нежность")
+        self.assertTrue(pack["template_1_dm"]["privacy_clean"])
+        self.assertTrue(pack["template_2_bot"]["privacy_clean"])
+        self.assertTrue(pack["template_3_comment"]["privacy_clean"])
+
+    def test_10_deactivate_channel_by_username(self):
+        # Add channel with custom code
+        add_or_update_promo_channel("@test_user_deact", "Канал Тест", custom_code="test_code_deact")
+        
+        # Deactivate by @username
+        success = deactivate_promo_channel("@test_user_deact")
+        self.assertTrue(success)
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT active FROM promo_channels WHERE code = 'test_code_deact'").fetchone()
+        conn.close()
+        self.assertEqual(row["active"], 0)
 
 if __name__ == "__main__":
     unittest.main()
