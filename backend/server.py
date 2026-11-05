@@ -207,8 +207,10 @@ def init_db():
 
         # Guarantee owner has private invite code (replace leaked PAIR-1CAAF2)
         cur.execute("UPDATE users SET invite_code = 'PAIR-DVOE23' WHERE username = 'ksjjfnnn' AND (invite_code = 'PAIR-1CAAF2' OR invite_code IS NULL OR invite_code = '')")
-        # Clean soft hyphen \xad from adamlanda display name
-        cur.execute("UPDATE users SET display_name = 'Любимая' WHERE username = 'adamlanda' AND (display_name LIKE '%\xad%' OR display_name = 'я' OR display_name = '')")
+        # Clean invisible soft hyphen \xad from any user display_name
+        for r_u in cur.execute("SELECT username, display_name FROM users WHERE display_name LIKE '%\xad%'").fetchall():
+            cleaned_dn = normalize_display_name(r_u["display_name"], fallback=r_u["username"])
+            cur.execute("UPDATE users SET display_name = ? WHERE username = ?", (cleaned_dn, r_u["username"]))
 
         # Sync existing uploads to uploaded_files
         try:
