@@ -300,5 +300,162 @@ class TestVpPromoSystem(unittest.TestCase):
         self.assertIn("blogtpdevochki", panel_text)
         self.assertIn("inline_keyboard", panel_kb)
 
+        # Ensure every button in build_vpadmin_panel() strictly respects Telegram's 64-byte callback_data limit
+        for row in panel_kb["inline_keyboard"]:
+            for btn in row:
+                if "callback_data" in btn:
+                    self.assertLessEqual(len(btn["callback_data"].encode("utf-8")), 64)
+
+    def test_12_interactive_bot_vpadmin_and_quick_approve_32char_limit(self):
+        """Verify end-to-end process_telegram_update for /vpadmin callbacks, 32-char channel quick-approve, and clean /start."""
+        from unittest.mock import patch
+        from backend.server import process_telegram_update, ADMIN_TG_ID
+
+        sent_messages = []
+        sent_photos = []
+
+        def fake_send_msg(chat_id, text, reply_markup=None, uname=""):
+            sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+            return {"ok": True}
+
+        def fake_send_photo(chat_id, photo_path, caption, reply_markup=None, uname=""):
+            sent_photos.append({"chat_id": chat_id, "caption": caption, "reply_markup": reply_markup})
+            return {"ok": True}
+
+        with patch("backend.server.tg_send_message", side_effect=fake_send_msg), \
+             patch("backend.server.tg_send_photo", side_effect=fake_send_photo), \
+             patch("backend.server.tg_api_call", return_value={"ok": True}), \
+             patch("backend.server.ensure_chat_menu_button"):
+
+            # 1. Verify /start has zero unsolicited channel recommendations in welcome caption or buttons
+            process_telegram_update({
+                "update_id": 1001,
+                "message": {
+                    "chat": {"id": 2034621049},
+                    "from": {"id": 2034621049, "username": "adamlanda", "first_name": "Adam"},
+                    "text": "/start"
+                }
+            })
+            self.assertGreaterEqual(len(sent_photos), 1)
+            welcome_cap = sent_photos[-1]["caption"]
+            self.assertNotIn("Рекомендуем канал", welcome_cap)
+            self.assertNotIn("blogtpdevochki", welcome_cap)
+            start_kb_str = str(sent_photos[-1]["reply_markup"])
+            self.assertNotIn("blogtpdevochki", start_kb_str)
+
+            # 2. Verify /menu includes the partner recommendation button when Polina's channel is active
+            sent_messages.clear()
+            process_telegram_update({
+                "update_id": 1002,
+                "message": {
+                    "chat": {"id": 2034621049},
+                    "from": {"id": 2034621049, "username": "adamlanda", "first_name": "Adam"},
+                    "text": "/menu"
+                }
+            })
+            self.assertGreaterEqual(len(sent_messages), 1)
+            menu_kb_str = str(sent_messages[0]["reply_markup"])
+            self.assertIn("Рекомендуем канал", menu_kb_str)
+
+            # 3. Verify 32-character maximum-length Telegram channel username in VP application -> 1-click approve
+            sent_messages.clear()
+            applicant_id = 1234567890
+            max_len_channel = "test_chan_max_32_characters_long"  # exactly 32 chars
+            self.assertEqual(len(max_len_channel), 32)
+
+            # User clicks vp_apply_ticket
+            process_telegram_update({
+                "update_id": 1003,
+                "callback_query": {
+                    "id": "cq_1",
+                    "from": {"id": applicant_id, "username": "real_partner_owner", "first_name": "Partner"},
+                    "data": "vp_apply_ticket"
+                }
+            })
+            # User submits 32-char channel username
+            sent_messages.clear()
+            process_telegram_update({
+                "update_id": 1004,
+                "message": {
+                    "chat": {"id": applicant_id},
+                    "from": {"id": applicant_id, "username": "real_partner_owner", "first_name": "Partner"},
+                    "text": f"Привет! Мой канал @{max_len_channel} — давайте сделаем ВП"
+                }
+            })
+            # Admin should receive notification with 1-click approve button whose callback_data <= 64 bytes
+            admin_notifs = [m for m in sent_messages if m["chat_id"] == ADMIN_TG_ID]
+            self.assertEqual(len(admin_notifs), 1)
+            approve_btn = admin_notifs[0]["reply_markup"]["inline_keyboard"][0][0]
+            cb_data = approve_btn["callback_data"]
+            self.assertLessEqual(len(cb_data.encode("utf-8")), 64, f"callback_data exceeded 64 bytes: {cb_data} ({len(cb_data)})")
+
+            # Admin clicks the 1-click approve button
+            sent_messages.clear()
+            process_telegram_update({
+                "update_id": 1005,
+                "callback_query": {
+                    "id": "cq_2",
+                    "from": {"id": ADMIN_TG_ID, "username": "ksjjfnnn", "first_name": "Admin"},
+                    "data": cb_data
+                }
+            })
+            ch_created = get_promo_channel_by_code(max_len_channel)
+            self.assertIsNotNone(ch_created)
+            self.assertEqual(ch_created["active"], 1)
+
+            # Admin pauses via vp_adm_pause callback
+            process_telegram_update({
+                "update_id": 1006,
+                "callback_query": {
+                    "id": "cq_3",
+                    "from": {"id": ADMIN_TG_ID, "username": "ksjjfnnn", "first_name": "Admin"},
+                    "data": f"vp_adm_pause:{max_len_channel}"
+                }
+            })
+            self.assertEqual(get_promo_channel_by_code(max_len_channel)["active"], 0)
+
+            # Admin resumes via vp_adm_resume callback
+            process_telegram_update({
+                "update_id": 1007,
+                "callback_query": {
+                    "id": "cq_4",
+                    "from": {"id": ADMIN_TG_ID, "username": "ksjjfnnn", "first_name": "Admin"},
+                    "data": f"vp_adm_resume:{max_len_channel}"
+                }
+            })
+            self.assertEqual(get_promo_channel_by_code(max_len_channel)["active"], 1)
+
+            # Admin deletes via vp_adm_del callback
+            process_telegram_update({
+                "update_id": 1008,
+                "callback_query": {
+                    "id": "cq_5",
+                    "from": {"id": ADMIN_TG_ID, "username": "ksjjfnnn", "first_name": "Admin"},
+                    "data": f"vp_adm_del:{max_len_channel}"
+                }
+            })
+            self.assertIsNone(get_promo_channel_by_code(max_len_channel))
+
+            # Clean up real_partner_owner test user and ticket
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DELETE FROM users WHERE username = 'real_partner_owner'")
+            conn.execute("DELETE FROM support_tickets WHERE username = 'real_partner_owner'")
+            conn.commit()
+            conn.close()
+
+    def test_13_snapshot_export_and_import_merge(self):
+        """Verify export_db_snapshot and import_db_snapshot preserve clicks and active status."""
+        snap = export_db_snapshot()
+        self.assertTrue(snap.get("ok"))
+        polina_list = [c for c in snap["promo_channels"] if c["code"] == "blogtpdevochki"]
+        self.assertEqual(len(polina_list), 1)
+        self.assertEqual(polina_list[0]["channel_description"], "девчачий блог про креатив, учебу, искренность и отношения💋❄️")
+
+        res = import_db_snapshot(snap)
+        self.assertTrue(res.get("ok"))
+        self.assertGreaterEqual(res.get("merged_channels", 0), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+

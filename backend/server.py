@@ -1590,6 +1590,1299 @@ def broadcast_updated_menu_to_all_users(force: bool = False) -> int:
     return updated_count
 
 
+def process_telegram_update(upd: dict):
+    """Processes a single Telegram update (callback_query or message)."""
+    # Handle Callback Queries
+    if "callback_query" in upd:
+        cq = upd["callback_query"]
+        cq_id = cq["id"]
+        from_u = cq.get("from", {})
+        chat_id = from_u.get("id")
+        ensure_chat_menu_button(chat_id)
+        raw_u = from_u.get("username") or ""
+        d_name = from_u.get("first_name") or ""
+        u_row = ensure_user(raw_u, display_name=d_name, tg_id=chat_id)
+        uname = u_row["username"] if (u_row and u_row.get("username")) else normalize_username(raw_u or f"user_{chat_id}")
+        data = cq.get("data", "")
+
+        tg_api_call("answerCallbackQuery", {"callback_query_id": cq_id})
+
+        if data == "enter_pair_code":
+            with db_lock:
+                conn = get_db()
+                conn.execute("INSERT OR REPLACE INTO pair_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_code', ?)", (chat_id, time.time()))
+                conn.commit()
+                conn.close()
+            st = get_user_full_state(uname)
+            u_info = st["user"] if st else {}
+            my_code = u_info.get("inviteCode", "PAIR-XXXXXX")
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {my_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{my_code}&text={share_text}"
+            tg_send_message(
+                chat_id,
+                "🔗 <b>Привязка партнёра</b>\n\n"
+                f"Ваш персональный код: <code>{my_code}</code>\n\n"
+                "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) ответным сообщением:",
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "📤 Поделиться моим кодом", "url": share_url}],
+                        [{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]
+                    ]
+                },
+                uname=uname
+            )
+        elif data == "cancel_pair_code":
+            with db_lock:
+                conn = get_db()
+                conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (chat_id,))
+                conn.commit()
+                conn.close()
+            tg_send_message(chat_id, "Привязка отменена.", uname=uname)
+        elif data == "support_prompt":
+            with db_lock:
+                conn = get_db()
+                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (chat_id, time.time()))
+                conn.commit()
+                conn.close()
+            tg_send_message(
+                chat_id,
+                "💬 <b>Связь с разработчиком</b>\n\n"
+                "Напишите ваше пожелание, вопрос в поддержку или предложение о сотрудничестве одним сообщением — "
+                "оно сразу будет передано разработчику:",
+                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
+                uname=uname
+            )
+        elif data == "cancel_support":
+            with db_lock:
+                conn = get_db()
+                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (chat_id,))
+                conn.commit()
+                conn.close()
+            tg_send_message(chat_id, "Действие отменено.", uname=uname)
+        elif data == "show_pair_code":
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            user_app_url = get_user_webapp_url(chat_id, uname)
+            open_btn = [{"text": "💑 Открыть Двое", "web_app": {"url": user_app_url}}] if user_app_url.startswith("https://") else []
+            inline_kb = [[{"text": "📤 Поделиться в Telegram", "url": share_url}]]
+            if open_btn:
+                inline_kb.append(open_btn)
+            tg_send_message(
+                chat_id,
+                f"🔗 <b>Ваш код пары:</b> <code>{inv_code}</code>\n\n"
+                f"Перешлите партнёру ссылку для быстрого подключения:\n"
+                f"https://t.me/{BOT_USERNAME}?start=pair_{inv_code}",
+                reply_markup={"inline_keyboard": inline_kb},
+                uname=uname
+            )
+        elif data == "about_app":
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            user_app_url = get_user_webapp_url(chat_id, uname)
+            about_kb = []
+            if user_app_url.startswith("https://"):
+                about_kb.append([{"text": "💑 Открыть «Двое»", "web_app": {"url": user_app_url}}])
+            about_kb.append([
+                {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                {"text": "📤 Пригласить партнёра", "url": share_url}
+            ])
+            about_kb.append([
+                {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"},
+                {"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}
+            ])
+            tg_send_message(
+                chat_id,
+                ABOUT_APP_TEXT,
+                reply_markup={"inline_keyboard": about_kb},
+                uname=uname
+            )
+        elif data and (data.startswith("vp_get_creative") or data.startswith("vp_creative:")):
+            code_arg = "partner"
+            variant_arg = "a"
+            if data.startswith("vp_creative:"):
+                parts_c = data.split(":")
+                if len(parts_c) > 1 and parts_c[1]:
+                    code_arg = parts_c[1]
+                if len(parts_c) > 2 and parts_c[2]:
+                    variant_arg = parts_c[2]
+            elif ":" in data:
+                code_arg = data.split(":", 1)[1]
+
+            var_titles = {
+                "a": "Пост 1 — Нежный и романтичный 💕",
+                "b": "Пост 2 — Жизненный и тёплый ✨",
+                "c": "Пост 3 — Короткий нативный 🤍"
+            }
+            cur_title = var_titles.get(variant_arg, "Пост 1")
+            post_raw = get_promo_creative_text(code_arg, variant_arg)
+            creative_msg = (
+                f"✨ <b>Готовый пост для канала ({cur_title}):</b>\n\n"
+                f"<code>{html.escape(post_raw)}</code>\n\n"
+                "<i>👆 Нажмите на текст выше, чтобы скопировать его в один клик. "
+                "Вы можете опубликовать его вместе с баннером или скриншотами приложения!</i>"
+            )
+            kb_creative = [
+                [
+                    {"text": ("• " if variant_arg == "a" else "") + "💕 Пост 1", "callback_data": f"vp_creative:{code_arg}:a"},
+                    {"text": ("• " if variant_arg == "b" else "") + "✨ Пост 2", "callback_data": f"vp_creative:{code_arg}:b"},
+                    {"text": ("• " if variant_arg == "c" else "") + "🤍 Пост 3", "callback_data": f"vp_creative:{code_arg}:c"}
+                ],
+                [{"text": "🖼 Скачать скриншоты приложения (2 шт.)", "callback_data": "vp_get_screens"}],
+                [{"text": "⬅️ Назад в раздел сотрудничества", "callback_data": "vp_menu"}]
+            ]
+
+            if data.startswith("vp_get_creative") and os.path.exists(PROMO_BANNER_PATH):
+                banner_caption = (
+                    "🎨 <b>Иллюстрация к посту для вашего канала (1280×720)</b> 💕\n"
+                    "<i>Ниже отправлен готовый текст поста с вашей персональной ссылкой:</i>"
+                )
+                tg_send_photo(chat_id, PROMO_BANNER_PATH, banner_caption, uname=uname)
+
+            tg_send_message(chat_id, creative_msg, reply_markup={"inline_keyboard": kb_creative}, uname=uname)
+        elif data == "vp_get_screens":
+            if os.path.exists(PROMO_SCREEN_1_PATH):
+                tg_send_photo(
+                    chat_id,
+                    PROMO_SCREEN_1_PATH,
+                    "📱 <b>Экран 1:</b> живой счётчик времени вместе до секунд и тёплые записки для второй половинки 💕",
+                    uname=uname
+                )
+            if os.path.exists(PROMO_SCREEN_2_PATH):
+                tg_send_photo(
+                    chat_id,
+                    PROMO_SCREEN_2_PATH,
+                    "📱 <b>Экран 2:</b> бережная синхронизация настроения с пояснением и быстрыми знаками внимания ❤️",
+                    reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый текст поста", "callback_data": "vp_get_creative:partner"}]]},
+                    uname=uname
+                )
+        elif data == "vp_menu":
+            vp_info_msg = (
+                "🤝 <b>Сотрудничество и взаимная поддержка каналов 💕</b>\n\n"
+                "Приглашаем к дружному бесплатному обмену аудиторией авторов уютных Telegram-каналов и блогов!\n\n"
+                "✨ <b>Что получает ваш канал:</b>\n"
+                "• <b>Новых вовлечённых подписчиков</b> — мы размещаем рекомендацию вашего канала с кнопкой подписки в боте и на главном экране приложения «Двое».\n"
+                "• <b>Готовые нежные материалы</b> — вам не нужно тратить время на тексты и макеты, всё уже подготовлено ниже в один клик.\n"
+                "• <b>Именную ссылку и статистику</b> — вы видите каждый переход в реальном времени.\n\n"
+                "<i>Нажмите «🚀 Подключить мой канал», чтобы начать сотрудничество!</i>"
+            )
+            kb_menu = [
+                [{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}],
+                [{"text": "📥 Посмотреть готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
+                [
+                    {"text": "💕 Пост 1", "callback_data": "vp_creative:partner:a"},
+                    {"text": "✨ Пост 2", "callback_data": "vp_creative:partner:b"},
+                    {"text": "🤍 Пост 3", "callback_data": "vp_creative:partner:c"}
+                ],
+                [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
+                [
+                    {"text": "📊 Моя статистика", "callback_data": "vp_my_stats"},
+                    {"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}
+                ]
+            ]
+            tg_send_message(chat_id, vp_info_msg, reply_markup={"inline_keyboard": kb_menu}, uname=uname)
+        elif data == "vp_my_stats":
+            matching = None
+            with db_lock:
+                conn = get_db()
+                cur = conn.cursor()
+                if uname:
+                    matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (uname,)).fetchone()
+                conn.close()
+            if matching:
+                ch = dict(matching)
+                tg_send_message(
+                    chat_id,
+                    f"📊 <b>Статистика вашего канала ({html.escape(ch['channel_title'])}):</b>\n\n"
+                    f"📢 <b>Канал:</b> {ch['channel_username']}\n"
+                    f"📌 <b>Код:</b> <code>{ch['code']}</code>\n"
+                    f"👥 <b>Уникальных переходов:</b> <b>{ch.get('clicks', 0)}</b>\n"
+                    f"🔗 <b>Ваша ссылка:</b>\nhttps://t.me/{BOT_USERNAME}?start=vp_{ch['code']}",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "📥 Получить пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
+                        [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}]
+                    ]},
+                    uname=uname
+                )
+            else:
+                tg_send_message(
+                    chat_id,
+                    "📊 <b>Подключение персональной статистики</b> 💕\n\n"
+                    "Чтобы получить именную ссылку со счётчиком переходов и добавить ваш канал в блок рекомендаций «Двое», нажмите кнопку ниже и отправьте ссылку на ваш канал!\n\n"
+                    "<i>Если у вас уже есть персональный код, просто отправьте:</i> <code>/vp ваш_код</code>",
+                    reply_markup={"inline_keyboard": [[{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}]]},
+                    uname=uname
+                )
+        elif data == "vp_apply_ticket":
+            with db_lock:
+                conn = get_db()
+                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_vp_application', ?)", (chat_id, time.time()))
+                conn.commit()
+                conn.close()
+            tg_send_message(
+                chat_id,
+                "🚀 <b>Подключение канала к сотрудничеству</b> 💕\n\n"
+                "Отправьте ответным сообщением ссылку на ваш Telegram-канал (например, <code>@ваш_канал</code>) и короткое описание (1 предложение о чём ваш канал).\n\n"
+                "Мы сразу добавим ваш канал в блок рекомендаций «Двое» и пришлём вашу именную ссылку!",
+                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
+                uname=uname
+            )
+        elif data == "vp_show_partner":
+            partner_ch = get_random_active_promo_partner()
+            if partner_ch:
+                p_title = html.escape(partner_ch["channel_title"])
+                p_desc = html.escape(partner_ch["channel_description"])
+                p_desc_block = f"<i>{p_desc}</i>\n\n" if p_desc else ""
+                p_u = partner_ch["channel_username"].lstrip("@")
+                tg_send_message(
+                    chat_id,
+                    f"✨ <b>Рекомендуемый канал друзей «Двое» 💕</b>\n\n"
+                    f"📢 <b><a href=\"https://t.me/{p_u}\">{p_title}</a></b>\n"
+                    f"{p_desc_block}"
+                    f"👉 <a href=\"https://t.me/{p_u}\">Перейти в канал</a>",
+                    reply_markup={"inline_keyboard": [[{"text": f"📢 Открыть {p_title}", "url": f"https://t.me/{p_u}"}]]},
+                    uname=uname
+                )
+            else:
+                tg_send_message(
+                    chat_id,
+                    "✨ <b>Пример карточки вашего канала в «Двое» 💕</b>\n\n"
+                    "Вот так аккуратно и нативно рекомендация вашего канала отображается для всех наших пользователей в боте и на главном экране приложения:\n\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    "✨ <b>Рекомендуем канал: Уютный уголок</b>\n"
+                    "<i>Тёплые мысли, эстетика и вдохновение для двоих на каждый день 🤍</i>\n"
+                    "━━━━━━━━━━━━━━━\n\n"
+                    "Нажмите кнопку ниже, чтобы подключить ваш канал к рекомендациям!",
+                    reply_markup={"inline_keyboard": [[{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}]]},
+                    uname=uname
+                )
+        elif data and data.startswith("vp_adm_"):
+            if chat_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Доступно только администратору.", uname=uname)
+                return
+            if data == "vp_adm_refresh":
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+            elif data == "vp_adm_add_prompt":
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_admin_add_vp', ?)", (chat_id, time.time()))
+                    conn.commit()
+                    conn.close()
+                tg_send_message(
+                    chat_id,
+                    "➕ <b>Добавление нового канала к сотрудничеству</b>\n\n"
+                    "Отправьте одним сообщением данные канала через вертикальную черту <code>|</code>:\n"
+                    "<code>@юзернейм | Название канала | Короткое описание</code>\n\n"
+                    "<i>Пример:</i>\n"
+                    "<code>@blogtpdevochki | блог девочки ❄️ | Уютный лайф-блог про жизнь, учёбу и атмосферу</code>",
+                    reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
+                    uname=uname
+                )
+            elif data == "vp_adm_pause_all":
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("UPDATE promo_channels SET active = 0")
+                    conn.commit()
+                    conn.close()
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, "⏸ <b>Все показы партнёрских каналов приостановлены.</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            elif data == "vp_adm_resume_all":
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("UPDATE promo_channels SET active = 1")
+                    conn.commit()
+                    conn.close()
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, "▶️ <b>Все партнёрские каналы снова включены!</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            elif data == "vp_adm_overall_stats":
+                with db_lock:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
+                    paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
+                    active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
+                    promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
+                    conn.close()
+                total_pairs = paired_users // 2
+                tg_send_message(
+                    chat_id,
+                    f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
+                    f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
+                    f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
+                    f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
+                    f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>",
+                    reply_markup={"inline_keyboard": [[{"text": "🎛 Назад в панель управления ВП", "callback_data": "vp_adm_refresh"}]]},
+                    uname=uname
+                )
+            elif data.startswith("vp_adm_pause:"):
+                code_arg = data.split(":", 1)[1]
+                deactivate_promo_channel(code_arg)
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_arg)}</code> приостановлено (канал скрыт из рекомендаций).\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            elif data.startswith("vp_adm_resume:"):
+                code_arg = data.split(":", 1)[1]
+                activate_promo_channel(code_arg)
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_arg)}</code> возобновлено (канал снова в рекомендациях)!\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            elif data.startswith("vp_adm_del:"):
+                code_arg = data.split(":", 1)[1]
+                delete_promo_channel_permanently(code_arg)
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_arg)}</code> полностью удалён из базы.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            elif data.startswith(("vp_adm_quick_approve:", "vp_adm_qa:")):
+                # Format: vp_adm_qa:<applicant_tg_id>:<channel_username> (fits within 64-byte Telegram limit even for 32-char usernames)
+                parts_qa = data.split(":")
+                app_uid = int(parts_qa[1]) if len(parts_qa) > 1 and parts_qa[1].isdigit() else 0
+                ch_u = parts_qa[2] if len(parts_qa) > 2 else ""
+                if ch_u:
+                    ch_info = add_or_update_promo_channel(ch_u, f"Канал @{ch_u.lstrip('@')}", "Уютный авторский Telegram-канал")
+                    ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
+                    p_text, p_kb = build_vpadmin_panel()
+                    tg_send_message(
+                        chat_id,
+                        f"✅ <b>Канал {ch_info['channel_username']} подключён в один клик!</b>\n"
+                        f"🔗 Ссылка: {ref_link}\n\n" + p_text,
+                        reply_markup=p_kb,
+                        uname=uname
+                    )
+                    if app_uid:
+                        tg_send_message(
+                            app_uid,
+                            f"🎉 <b>Ваш канал {ch_info['channel_username']} подключён к сотрудничеству с «Двое»!</b> 💕\n\n"
+                            f"Теперь ваш канал отображается в рекомендациях для наших пользователей.\n\n"
+                            f"🔗 <b>Ваша именная ссылка для поста:</b>\n{ref_link}\n\n"
+                            "Нажмите кнопку ниже, чтобы получить готовый пост и баннер:",
+                            reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch_info['code']}"}]]}
+                        )
+        return
+
+    # Handle Messages
+    if "message" in upd:
+        msg = upd["message"]
+        chat_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
+        from_user = msg.get("from", {})
+        tg_id = from_user.get("id") or chat_id
+        raw_u = from_user.get("username") or ""
+        first_name = from_user.get("first_name") or ""
+        u_row = ensure_user(raw_u, display_name=first_name, tg_id=tg_id)
+        uname = u_row["username"] if (u_row and u_row.get("username")) else normalize_username(raw_u or f"user_{tg_id}")
+        ensure_chat_menu_button(chat_id)
+
+        text = (msg.get("text") or "").strip()
+        webapp_url = get_current_webapp_url()
+        user_webapp_url = f"{webapp_url}?tg_user={uname}&tg_id={tg_id}" if (webapp_url and webapp_url.startswith("https://")) else webapp_url
+
+        KNOWN_MENU_ACTIONS = {
+            "💑 Открыть «Двое»", "🔗 Привязать партнёра", "📤 Пригласить партнёра",
+            "📖 О приложении", "💬 Связь с разработчиком", "💌 Послать знак внимания",
+            "ℹ️ Мой статус", "🤝 Сотрудничество и ВП", "🤝 Взаимный пиар"
+        }
+
+        # 1. Admin Reply to Support Ticket Forwarding
+        if tg_id == ADMIN_TG_ID and msg.get("reply_to_message") and not text.startswith("/"):
+            orig = msg["reply_to_message"].get("text", "")
+            m_uid = re.search(r"TG ID:\s*<code>?(\d+)</code>?", orig)
+            if m_uid:
+                user_dest_id = int(m_uid.group(1))
+                tg_send_message(
+                    user_dest_id,
+                    f"📬 <b>👨‍💻 Ответ разработчика «Двое»:</b>\n\n{text}\n\n<i>Приятного пользования приложением! 💕</i>",
+                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(user_dest_id)}}]]}
+                )
+                tg_send_message(ADMIN_TG_ID, f"✅ Ответ успешно передан пользователю (TG ID: <code>{user_dest_id}</code>).")
+                return
+
+        # 2. Check Support Session or Admin Interactive VP Add Session
+        in_support = False
+        is_vp_app = False
+        is_admin_add_vp = False
+        with db_lock:
+            conn = get_db()
+            sess = conn.execute("SELECT state, updated_at FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
+            if sess and sess["state"] in ("awaiting_ticket", "awaiting_vp_application", "awaiting_admin_add_vp"):
+                if time.time() - (sess["updated_at"] or 0) < 900:
+                    in_support = True
+                    is_vp_app = (sess["state"] == "awaiting_vp_application")
+                    is_admin_add_vp = (sess["state"] == "awaiting_admin_add_vp")
+                else:
+                    conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                    conn.commit()
+            conn.close()
+
+        if in_support and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
+            with db_lock:
+                conn = get_db()
+                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                conn.commit()
+                conn.close()
+            in_support = False
+
+        if in_support and is_admin_add_vp and tg_id == ADMIN_TG_ID:
+            with db_lock:
+                conn = get_db()
+                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                conn.commit()
+                conn.close()
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) >= 2:
+                ch_u = parts[0]
+                ch_title = parts[1]
+                ch_desc = parts[2] if len(parts) > 2 else ""
+            else:
+                # Allow single @username input with sensible defaults
+                ch_u = parts[0].split()[0]
+                ch_title = parts[0]
+                ch_desc = "Уютный авторский Telegram-канал"
+            ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
+            p_text, p_kb = build_vpadmin_panel()
+            tg_send_message(
+                chat_id,
+                f"✅ <b>Канал {ch_info['channel_username']} успешно добавлен и включён!</b>\n"
+                f"🔗 Ссылка для партнёра: https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}\n\n" + p_text,
+                reply_markup=p_kb,
+                uname=uname
+            )
+            return
+
+        if in_support:
+            cat = "vp_partnership" if is_vp_app else "support"
+            with db_lock:
+                conn = get_db()
+                conn.execute(
+                    "INSERT INTO support_tickets (tg_id, username, display_name, message, message_text, category, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'new')",
+                    (tg_id, uname, first_name, text, text, cat, time.time())
+                )
+                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
+                conn.commit()
+                conn.close()
+
+            # Forward to admin (suppress for test/stress users)
+            if not uname.startswith(("test_", "stress_")):
+                prefix_title = "🤝 <b>Новая заявка на Взаимный Пиар (ВП)!</b>" if is_vp_app else "📩 <b>Новое обращение в «Двое»!</b>"
+                admin_msg = (
+                    f"{prefix_title}\n\n"
+                    f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
+                    f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
+                    f"💬 <b>Текст:</b>\n{html.escape(text)}"
+                )
+                admin_kb = None
+                if is_vp_app:
+                    m_ch = re.search(r"(?:@|(?:t\.me|telegram\.me)/)([a-zA-Z0-9_]{4,32})", text)
+                    if m_ch:
+                        extracted_ch = m_ch.group(1)[:32]
+                        admin_kb = {
+                            "inline_keyboard": [
+                                [{"text": f"✅ Подключить @{extracted_ch} в 1 клик", "callback_data": f"vp_adm_qa:{tg_id}:{extracted_ch}"}],
+                                [{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]
+                            ]
+                        }
+                    else:
+                        admin_kb = {"inline_keyboard": [[{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]]}
+                tg_send_message(ADMIN_TG_ID, admin_msg, reply_markup=admin_kb)
+
+            # Confirm to user
+            confirm_text = (
+                "✅ <b>Спасибо!</b> Ваша заявка на взаимный пиар получена разработчиком 💕\n"
+                "Мы свяжемся с вами в ближайшее время прямо здесь в боте."
+                if is_vp_app else
+                "✅ <b>Спасибо!</b> Ваше сообщение успешно отправлено разработчику 💕\n"
+                "Мы ответим вам в ближайшее время прямо здесь в боте."
+            )
+            tg_send_message(
+                chat_id,
+                confirm_text,
+                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                uname=uname
+            )
+            return
+
+        # 3. Check Pair Session OR Direct Code Input
+        in_pair_session = False
+        with db_lock:
+            conn = get_db()
+            psess = conn.execute("SELECT state, updated_at FROM pair_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
+            if psess and psess["state"] == "awaiting_code":
+                if time.time() - (psess["updated_at"] or 0) < 900:
+                    in_pair_session = True
+                else:
+                    conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
+                    conn.commit()
+            conn.close()
+
+        if in_pair_session and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
+            with db_lock:
+                conn = get_db()
+                conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
+                conn.commit()
+                conn.close()
+            in_pair_session = False
+
+        extracted_code = ""
+        m_pair = re.search(r"\b(PAIR-[A-Z0-9]{6})\b", text, re.IGNORECASE)
+        if m_pair:
+            extracted_code = m_pair.group(1).upper()
+        elif in_pair_session and not text.startswith("/"):
+            cleaned = text.strip().upper()
+            if re.match(r"^[A-Z0-9]{6}$", cleaned):
+                extracted_code = f"PAIR-{cleaned}"
+            elif re.match(r"^PAIR-[A-Z0-9]{6}$", cleaned):
+                extracted_code = cleaned
+
+        if extracted_code:
+            with db_lock:
+                conn = get_db()
+                cur = conn.cursor()
+                target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (extracted_code, uname)).fetchone()
+                conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
+                conn.commit()
+                conn.close()
+
+            if not target:
+                tg_send_message(
+                    chat_id,
+                    "❌ Партнёр с таким кодом не найден. Проверьте правильность кода и попробуйте снова:",
+                    reply_markup={"inline_keyboard": [[{"text": "🔄 Ввести код снова", "callback_data": "enter_pair_code"}]]},
+                    uname=uname
+                )
+                return
+
+            target_uname = target["username"]
+            # Anti-Hijacking verification: caller or target already in a pair
+            caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+            if caller_partner and caller_partner != target_uname:
+                tg_send_message(
+                    chat_id,
+                    "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                return
+
+            if target.get("partner_username") and target.get("partner_username") != uname:
+                tg_send_message(
+                    chat_id,
+                    "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                return
+
+            paired = pair_users(uname, target_uname)
+            if paired:
+                target_display = (target.get("display_name") or target_uname).strip()
+                caller_display = (first_name or uname).strip()
+                tg_send_message(
+                    chat_id,
+                    f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
+                    "Откройте приложение «Двое», чтобы видеть общий счётчик и настроение партнёра!",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                if target.get("tg_id"):
+                    tg_send_message(
+                        target["tg_id"],
+                        f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                        reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                        uname=target_uname
+                    )
+            else:
+                tg_send_message(chat_id, "❌ Не удалось привязать пару. Попробуйте позже.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
+            return
+
+        # If user is in pair session but typed an invalid code (and didn't select a menu button)
+        if in_pair_session and not text.startswith("/") and text not in KNOWN_MENU_ACTIONS:
+            tg_send_message(
+                chat_id,
+                "⚠️ <b>Неверный формат кода.</b>\n\n"
+                "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code> или 6 символов <code>777LOVE</code>) либо нажмите «❌ Отмена»:",
+                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]]},
+                uname=uname
+            )
+            return
+
+        # 3b. Admin Command: /addvp <channel_username> | <Название> | <Описание>
+        if text.startswith("/addvp"):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            raw_args = text[len("/addvp"):].strip()
+            parts = [p.strip() for p in raw_args.split("|")]
+            if len(parts) >= 2:
+                ch_u = parts[0]
+                ch_title = parts[1]
+                ch_desc = parts[2] if len(parts) > 2 else ""
+                ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
+                ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(
+                    chat_id,
+                    f"✅ <b>Партнёрский канал успешно добавлен!</b>\n\n"
+                    f"📌 <b>Код:</b> <code>{ch_info['code']}</code>\n"
+                    f"📢 <b>Канал:</b> {ch_info['channel_username']}\n"
+                    f"🏷 <b>Название:</b> {html.escape(ch_info['channel_title'])}\n"
+                    f"📝 <b>Описание:</b> {html.escape(ch_info['channel_description'])}\n"
+                    f"🔗 <b>Реферальная ссылка:</b>\n{ref_link}\n\n" + p_text,
+                    reply_markup=p_kb,
+                    uname=uname
+                )
+            else:
+                tg_send_message(
+                    chat_id,
+                    "⚠️ <b>Использование:</b>\n<code>/addvp @username | Название канала | Краткое описание</code>\n\n"
+                    "Пример:\n<code>/addvp @love_notes | Дневник чувств | Эстетичные цитаты и мысли о любви</code>\n\n"
+                    "Либо нажмите кнопку ниже для интерактивного добавления:",
+                    reply_markup={"inline_keyboard": [[{"text": "➕ Добавить канал интерактивно", "callback_data": "vp_adm_add_prompt"}]]},
+                    uname=uname
+                )
+            return
+
+        # 3c. Admin Command: /delvp or /pausevp <code> (pauses channel)
+        if text.startswith(("/delvp", "/pausevp", "/stopvp")):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            cmd_used = text.split()[0]
+            code_to_del = text[len(cmd_used):].strip()
+            if not code_to_del:
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                return
+            deactivated = deactivate_promo_channel(code_to_del)
+            p_text, p_kb = build_vpadmin_panel()
+            if deactivated:
+                tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_to_del)}</code> приостановлено.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            else:
+                tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_del)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            return
+
+        # 3c2. Admin Command: /resumevp <code> (resumes paused channel)
+        if text.startswith(("/resumevp", "/startvp")):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            cmd_used = text.split()[0]
+            code_to_res = text[len(cmd_used):].strip()
+            if not code_to_res:
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                return
+            resumed = activate_promo_channel(code_to_res)
+            p_text, p_kb = build_vpadmin_panel()
+            if resumed:
+                tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_to_res)}</code> возобновлено!\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            else:
+                tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_res)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            return
+
+        # 3c3. Admin Command: /removevp <code> (permanently deletes channel)
+        if text.startswith("/removevp"):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            code_to_rm = text[len("/removevp"):].strip()
+            if not code_to_rm:
+                p_text, p_kb = build_vpadmin_panel()
+                tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+                return
+            removed = delete_promo_channel_permanently(code_to_rm)
+            p_text, p_kb = build_vpadmin_panel()
+            if removed:
+                tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_to_rm)}</code> полностью удалён.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            else:
+                tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_rm)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
+            return
+
+        # 3d. Admin Command: /vpstats or /vpadmin (Interactive 1-click collaboration control panel)
+        if text in ("/vpstats", "/vpadmin", "статистика вп", "панель вп", "управление вп") or text.startswith("/vpadmin"):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            p_text, p_kb = build_vpadmin_panel()
+            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
+            return
+
+        # 3d2. Admin Command: /stats or /adminstats (Overall bot user base & pairs)
+        if text in ("/stats", "/adminstats", "статистика", "пользователи") or text.startswith("/stats"):
+            if tg_id != ADMIN_TG_ID:
+                tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
+                return
+            with db_lock:
+                conn = get_db()
+                cur = conn.cursor()
+                total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
+                paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
+                active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
+                promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
+                conn.close()
+
+            total_pairs = paired_users // 2
+            stats_msg = (
+                f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
+                f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
+                f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
+                f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
+                f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>\n\n"
+                f"<i>Управлять партнёрскими каналами в 1 клик можно через кнопку ниже или команду /vpadmin</i>"
+            )
+            tg_send_message(
+                chat_id,
+                stats_msg,
+                reply_markup={"inline_keyboard": [[{"text": "🎛 Управление каналами ВП", "callback_data": "vp_adm_refresh"}]]},
+                uname=uname
+            )
+            return
+
+        # 3e. Command: /vp (Mutual PR / Cross-Promo portal)
+        if text in ("/vp", "вп", "🤝 взаимный пиар", "🤝 сотрудничество и вп", "🤝 сотрудничество", "сотрудничество", "/promo") or text.lower() in ("🤝 сотрудничество и вп", "🤝 взаимный пиар", "сотрудничество и вп") or text.startswith("/vp"):
+            vp_code_arg = text[len("/vp"):].strip() if text.startswith("/vp") else ""
+            matching = None
+            if vp_code_arg:
+                norm = normalize_promo_code(vp_code_arg)
+                with db_lock:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(code) = LOWER(?)", (norm,)).fetchone()
+                    if not matching:
+                        clean_u = norm.lstrip("@").lower()
+                        matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = ?", (clean_u,)).fetchone()
+                    conn.close()
+            elif uname:
+                with db_lock:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (uname,)).fetchone()
+                    conn.close()
+
+            if matching:
+                ch = dict(matching)
+                ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch['code']}"
+                vp_info_msg = (
+                    f"🤝 <b>Кабинет партнёра: {html.escape(ch['channel_title'])}</b> 💕\n\n"
+                    f"📢 <b>Ваш канал:</b> {ch['channel_username']}\n"
+                    f"📌 <b>Персональный код:</b> <code>{ch['code']}</code>\n"
+                    f"👥 <b>Приведено пользователей:</b> <b>{ch.get('clicks', 0)}</b>\n\n"
+                    f"🔗 <b>Ваша именная ссылка для поста:</b>\n{ref_link}\n\n"
+                    "<i>Ниже вы можете в один клик получить готовые нежные макеты и тексты для публикации:</i>"
+                )
+                kb = [
+                    [{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
+                    [
+                        {"text": "💕 Пост 1", "callback_data": f"vp_creative:{ch['code']}:a"},
+                        {"text": "✨ Пост 2", "callback_data": f"vp_creative:{ch['code']}:b"},
+                        {"text": "🤍 Пост 3", "callback_data": f"vp_creative:{ch['code']}:c"}
+                    ],
+                    [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
+                    [{"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}],
+                    [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
+                ]
+            else:
+                vp_info_msg = (
+                    "🤝 <b>Сотрудничество и взаимная поддержка каналов 💕</b>\n\n"
+                    "Приглашаем к дружному бесплатному обмену аудиторией авторов уютных Telegram-каналов и блогов!\n\n"
+                    "✨ <b>Что получает ваш канал:</b>\n"
+                    "• <b>Новых вовлечённых подписчиков</b> — мы размещаем рекомендацию вашего канала с кнопкой подписки в боте и на главном экране приложения «Двое».\n"
+                    "• <b>Готовые нежные материалы</b> — вам не нужно тратить время на тексты и макеты, всё уже подготовлено ниже в один клик.\n"
+                    "• <b>Именную ссылку и статистику</b> — вы видите каждый переход в реальном времени.\n\n"
+                    "<i>Нажмите «🚀 Подключить мой канал», чтобы начать сотрудничество!</i>"
+                )
+                kb = [
+                    [{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}],
+                    [{"text": "📥 Посмотреть готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
+                    [
+                        {"text": "💕 Пост 1", "callback_data": "vp_creative:partner:a"},
+                        {"text": "✨ Пост 2", "callback_data": "vp_creative:partner:b"},
+                        {"text": "🤍 Пост 3", "callback_data": "vp_creative:partner:c"}
+                    ],
+                    [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
+                    [
+                        {"text": "📊 Моя статистика", "callback_data": "vp_my_stats"},
+                        {"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}
+                    ]
+                ]
+            tg_send_message(chat_id, vp_info_msg, reply_markup={"inline_keyboard": kb}, uname=uname)
+            return
+
+        # 4. Command: /support
+        if text.startswith("/support"):
+            inline_text = text[len("/support"):].strip()
+            if inline_text:
+                with db_lock:
+                    conn = get_db()
+                    conn.execute(
+                        "INSERT INTO support_tickets (tg_id, username, display_name, message, message_text, category, created_at, status) VALUES (?, ?, ?, ?, ?, 'support', ?, 'new')",
+                        (tg_id, uname, first_name, inline_text, inline_text, time.time())
+                    )
+                    conn.commit()
+                    conn.close()
+                if not uname.startswith(("test_", "stress_")):
+                    admin_msg = (
+                        f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
+                        f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
+                        f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
+                        f"💬 <b>Текст:</b>\n{html.escape(inline_text)}"
+                    )
+                    tg_send_message(ADMIN_TG_ID, admin_msg)
+                tg_send_message(
+                    chat_id,
+                    "✅ <b>Спасибо!</b> Ваше обращение передано разработчику 💕",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+            else:
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (tg_id, time.time()))
+                    conn.commit()
+                    conn.close()
+                tg_send_message(
+                    chat_id,
+                    "💬 <b>Связь с разработчиком</b>\n\n"
+                    "Напишите ваш вопрос, пожелание или предложение одним сообщением — "
+                    "оно сразу будет передано разработчику:",
+                    reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]}
+                )
+            return
+
+        # 5. Command: /pair <code> or Menu Button "🔗 Привязать партнёра"
+        if text in ("🔗 Привязать партнёра", "привязать партнёра", "привязать", "/pair") or text.startswith("/pair"):
+            code = text[len("/pair"):].strip().upper() if text.startswith("/pair") else ""
+            if not code:
+                st = get_user_full_state(uname)
+                user = st["user"] if st else {}
+                partner = st.get("partner") if st else None
+                inv_code = user.get("inviteCode", "PAIR-XXXXXX")
+                share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+                share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+
+                if partner:
+                    partner_name = html.escape((partner.get("displayName") or f"@{partner.get('username')}").strip())
+                    tg_send_message(
+                        chat_id,
+                        f"💕 <b>У вас уже привязана пара!</b>\n\n"
+                        f"Ваша вторая половинка: <b>{partner_name}</b> (@{partner.get('username')}).\n\n"
+                        "Если вы хотите подключить другого человека, сначала отвяжите текущую пару с помощью команды /unlink.",
+                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                        uname=uname
+                    )
+                    return
+
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("INSERT OR REPLACE INTO pair_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_code', ?)", (tg_id, time.time()))
+                    conn.commit()
+                    conn.close()
+
+                msg = (
+                    "🔗 <b>Привязка партнёра</b>\n\n"
+                    f"Ваш персональный код: <code>{inv_code}</code>\n\n"
+                    "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) следующим сообщением:"
+                )
+                kb = [
+                    [{"text": "📤 Поделиться моим кодом", "url": share_url}],
+                    [{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]
+                ]
+                tg_send_message(
+                    chat_id,
+                    msg,
+                    reply_markup={"inline_keyboard": kb},
+                    uname=uname
+                )
+                return
+
+            with db_lock:
+                conn = get_db()
+                cur = conn.cursor()
+                target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (code, uname)).fetchone()
+                conn.close()
+
+            if not target:
+                tg_send_message(chat_id, "❌ Партнёр с таким кодом не найден. Проверьте правильность кода.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
+                return
+
+            target_uname = target["username"]
+            # Anti-Hijacking verification: caller or target already in a pair
+            caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+            if caller_partner and caller_partner != target_uname:
+                tg_send_message(
+                    chat_id,
+                    "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                return
+
+            if target.get("partner_username") and target.get("partner_username") != uname:
+                tg_send_message(
+                    chat_id,
+                    "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                return
+
+            paired = pair_users(uname, target_uname)
+            if paired:
+                target_display = (target.get("display_name") or target_uname).strip()
+                caller_display = (first_name or uname).strip()
+                tg_send_message(
+                    chat_id,
+                    f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
+                    "Откройте приложение, чтобы увидеть ваш общий счётчик времени и настроение партнёра!",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+                if target.get("tg_id"):
+                    tg_send_message(
+                        target["tg_id"],
+                        f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
+                        reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                        uname=target_uname
+                    )
+            return
+
+        # 6. Command: /unlink
+        if text.startswith("/unlink"):
+            p_uname = unlink_user(uname)
+            if p_uname:
+                with db_lock:
+                    conn = get_db()
+                    p = conn.execute("SELECT tg_id FROM users WHERE username = ?", (p_uname,)).fetchone()
+                    conn.close()
+                tg_send_message(chat_id, "💔 Вы отвязали партнёра. Теперь вы можете подключить новую пару.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
+                if p and p["tg_id"]:
+                    tg_send_message(p["tg_id"], f"💔 Партнёр @{html.escape(uname)} отвязал пару.", reply_markup=get_main_reply_keyboard(chat_id=p["tg_id"], uname=p_uname), uname=p_uname)
+            else:
+                tg_send_message(chat_id, "У вас нет привязанного партнёра.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
+            return
+
+        # 7. Command: /start (including /start pair_<code>, /start vp_<code>, /start ref_<code>)
+        if text.startswith("/start"):
+            parts = text.split()
+            pair_param = parts[1] if len(parts) > 1 else ""
+
+            # Cross-Promo referral tracking: /start vp_<code> or /start ref_<code>
+            if pair_param.startswith("vp_") or pair_param.startswith("ref_"):
+                record_promo_referral(tg_id, pair_param)
+
+            paired_now = False
+            inviter_name = ""
+            if pair_param.startswith("pair_"):
+                code = pair_param[len("pair_"):].strip().upper()
+                with db_lock:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (code, uname)).fetchone()
+                    conn.close()
+                if target:
+                    target_uname = target["username"]
+                    inviter_name = (target["display_name"] or "").strip() or f"@{target_uname}"
+                    caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
+                    if caller_partner and caller_partner != target_uname:
+                        tg_send_message(
+                            chat_id,
+                            "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
+                        )
+                    elif target.get("partner_username") and target.get("partner_username") != uname:
+                        tg_send_message(
+                            chat_id,
+                            "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
+                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                            uname=uname
+                        )
+                    else:
+                        if pair_users(uname, target_uname):
+                            paired_now = True
+                            if target.get("tg_id"):
+                                 caller_name = (first_name or uname).strip()
+                                 tg_send_message(
+                                     target["tg_id"],
+                                     f"🎉 <b>{html.escape(caller_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
+                                     reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
+                                     uname=target_uname
+                                 )
+
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+
+            if paired_now:
+                welcome = (
+                    f"🎉 <b>Вы успешно соединились с {html.escape(inviter_name)}!</b> 💕\n\n"
+                    "Теперь в приложении «Двое» вы можете:\n"
+                    "⏳ Отслеживать сколько вы вместе (годы, месяцы, дни, часы, минуты, секунды)\n"
+                    "💭 Видеть настроение друг друга в реальном времени с подробными пояснениями\n"
+                    "🖼 Менять и просматривать фотографии 1:1"
+                )
+            else:
+                welcome = (
+                    "✨ <b>«Двое»</b> — эстетичное минималистичное пространство для любящей пары.\n\n"
+                    "Здесь вы сможете:\n"
+                    "⏳ <b>Точный счётчик времени вместе</b> — годы, месяцы, дни, часы, минуты и секунды\n"
+                    "💭 <b>Настроение партнёра</b> — статус в реальном времени с пояснениями, почему такое настроение\n"
+                    "🖼 <b>Фото 1:1</b> — профили с любимыми фотографиями\n\n"
+                    f"🔗 <b>Ваш код для пары:</b> <code>{inv_code}</code>"
+                )
+
+            kb = [
+                [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
+                [
+                    {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                    {"text": "📤 Пригласить партнёра", "url": share_url}
+                ],
+                [
+                    {"text": "📖 О приложении", "callback_data": "about_app"},
+                    {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"}
+                ],
+                [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
+            ]
+
+            tg_send_photo(chat_id, BANNER_IMAGE_PATH, welcome, reply_markup={"inline_keyboard": kb}, uname=uname)
+            tg_send_message(
+                chat_id,
+                "💫 <b>Быстрое меню закреплено внизу экрана:</b> вы можете в любой момент отправить знак внимания или проверить статус!",
+                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                uname=uname
+            )
+            return
+
+        # 8. Command: Nudge / Sign of Attention
+        if text in ("💌 Послать знак внимания", "/nudge", "знак внимания") or text.startswith("/nudge") or "послать знак внимания" in text.lower():
+            with db_lock:
+                conn = get_db()
+                cur = conn.cursor()
+                u_row = cur.execute("SELECT display_name, partner_username FROM users WHERE username = ?", (uname,)).fetchone()
+                p_uname = u_row["partner_username"] if u_row else None
+                p_row = None
+                if p_uname:
+                    p_row = cur.execute("SELECT tg_id, display_name FROM users WHERE username = ?", (p_uname,)).fetchone()
+                    cur.execute(
+                        "UPDATE users SET mood_reaction = '❤️', mood_reaction_from = ?, mood_reaction_at = ? WHERE username = ?",
+                        (uname, time.time(), p_uname)
+                    )
+                    conn.commit()
+                conn.close()
+
+            if not p_uname:
+                tg_send_message(
+                    chat_id,
+                    "💔 <b>У вас пока нет привязанного партнёра.</b>\n\n"
+                    "Используйте команду /pair или передайте ваш код для подключения второй половинке.",
+                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                    uname=uname
+                )
+            else:
+                sender_name = html.escape(((u_row["display_name"] if u_row else None) or "").strip() or f"@{uname}")
+                partner_name = html.escape(((p_row["display_name"] if p_row else None) or "").strip() or p_uname)
+                if p_row and p_row["tg_id"]:
+                    tg_send_message(
+                        p_row["tg_id"],
+                        f"❤️ <b>{sender_name} думает о вас и шлёт вам знак внимания!</b> 💕",
+                        reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row['tg_id'], p_uname)}}]]},
+                        uname=p_uname
+                    )
+                    tg_send_message(
+                        chat_id,
+                        f"❤️ <b>Знак внимания отправлен для {partner_name}!</b> 💕\n<i>Партнёр получит мгновенное уведомление в Telegram.</i>",
+                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                        uname=uname
+                    )
+                else:
+                    tg_send_message(
+                        chat_id,
+                        f"❤️ <b>Знак внимания сохранён для {partner_name}!</b> 💕\n<i>Партнёр увидит его при входе в приложение.</i>",
+                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                        uname=uname
+                    )
+            return
+
+        # 9. Command: Status
+        if text in ("ℹ️ Мой статус", "/status", "мой статус") or text.startswith("/status") or "мой статус" in text.lower():
+            st = get_user_full_state(uname)
+            user = st["user"] if st else {}
+            partner = st.get("partner")
+            inv_code = user.get("inviteCode", "PAIR-XXXXXX")
+            user_name = html.escape((user.get("displayName") or f"@{uname}").strip())
+            user_mood = f"{user.get('moodEmoji', '🥰')} {html.escape(user.get('moodLabel', 'Люблю'))}"
+            user_reason = html.escape((user.get("moodReason") or "").strip())
+
+            if partner:
+                p_name = html.escape((partner.get("displayName") or f"@{partner.get('username')}").strip())
+                p_mood = f"{partner.get('moodEmoji', '🥰')} {html.escape(partner.get('moodLabel', 'Люблю'))}"
+                p_reason = html.escape((partner.get("moodReason") or "").strip())
+                rel_start = st.get("relationshipStart")
+                days_str = ""
+                if rel_start:
+                    try:
+                        dt_rel = datetime.strptime(str(rel_start)[:10], "%Y-%m-%d")
+                        days_cnt = max(0, (datetime.now() - dt_rel).days)
+                        days_str = f"⏳ <b>Дней вместе:</b> {days_cnt} дн.\n"
+                    except Exception:
+                        pass
+
+                status_text = (
+                    f"💑 <b>Статус вашей пары</b>\n\n"
+                    f"👤 <b>Вы:</b> {user_name}\n"
+                    f"💭 <b>Ваше настроение:</b> {user_mood}" + (f"\n<i>«{user_reason}»</i>" if user_reason else "") + "\n\n"
+                    f"❤️ <b>Партнёр:</b> {p_name}\n"
+                    f"💭 <b>Настроение партнёра:</b> {p_mood}" + (f"\n<i>«{p_reason}»</i>" if p_reason else "") + "\n\n"
+                    f"{days_str}"
+                    f"🔗 <b>Код пары:</b> <code>{inv_code}</code>"
+                )
+            else:
+                status_text = (
+                    f"ℹ️ <b>Ваш статус</b>\n\n"
+                    f"👤 <b>Имя:</b> {user_name}\n"
+                    f"💭 <b>Настроение:</b> {user_mood}" + (f"\n<i>«{user_reason}»</i>" if user_reason else "") + "\n"
+                    f"💔 <b>Партнёр:</b> не подключён\n\n"
+                    f"🔗 <b>Ваш код для пары:</b> <code>{inv_code}</code>\n"
+                    f"Передайте этот код второй половинке, чтобы соединиться!"
+                )
+
+            tg_send_message(
+                chat_id,
+                status_text,
+                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                uname=uname
+            )
+            return
+
+        # 10. Open WebApp command
+        if text in ("💑 Открыть «Двое»", "/open", "/app", "/dvoe", "/webapp", "открыть «двое»", "открыть двое", "двое"):
+            tg_send_message(
+                chat_id,
+                "✨ Нажмите кнопку ниже, чтобы открыть приложение «Двое» 💕",
+                reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]]},
+                uname=uname
+            )
+            return
+
+        # 10b. Menu command
+        if text in ("/menu", "меню", "/help", "помощь") or text.startswith("/menu"):
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            menu_kb = [
+                [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
+                [
+                    {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                    {"text": "📤 Пригласить партнёра", "url": share_url}
+                ],
+                [
+                    {"text": "📖 О приложении", "callback_data": "about_app"},
+                    {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"}
+                ],
+                [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
+            ]
+            partner_ch = get_random_active_promo_partner()
+            if partner_ch:
+                p_u = partner_ch["channel_username"].lstrip("@")
+                menu_kb.append([{"text": f"✨ Рекомендуем канал: {partner_ch['channel_title']}", "url": f"https://t.me/{p_u}"}])
+            tg_send_message(
+                chat_id,
+                "📋 <b>Главное меню «Двое» 💕</b>\n\n"
+                "Кнопки быстрого доступа всегда закреплены внизу экрана:\n"
+                "• <b>💑 Открыть «Двое»</b> — открыть приложение для вашей пары\n"
+                "• <b>🔗 Привязать партнёра</b> — соединить профили по коду\n"
+                "• <b>📤 Пригласить партнёра</b> — получить персональный код для второй половинки\n"
+                "• <b>💌 Послать знак внимания</b> — отправить мгновенное уведомление половинке\n"
+                "• <b>ℹ️ Мой статус</b> — проверить дни вместе и статус партнёра\n"
+                "• <b>📖 О приложении</b> — узнать о возможностях сервиса\n"
+                "• <b>🤝 Сотрудничество и ВП</b> — бесплатный обмен аудиторией для Telegram-каналов\n"
+                "• <b>💬 Связь с разработчиком</b> — поддержка и предложения",
+                reply_markup={"inline_keyboard": menu_kb},
+                uname=uname
+            )
+            tg_send_message(
+                chat_id,
+                "💫 <b>Быстрое меню закреплено внизу экрана</b> для доступа в любой момент:",
+                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+                uname=uname
+            )
+            return
+
+        # 10c. About App
+        if text in ("📖 О приложении", "/about", "о приложении", "о проекте") or text.startswith("/about"):
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            about_kb = [
+                [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
+                [
+                    {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
+                    {"text": "📤 Пригласить партнёра", "url": share_url}
+                ],
+                [
+                    {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"},
+                    {"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}
+                ]
+            ]
+            tg_send_message(
+                chat_id,
+                ABOUT_APP_TEXT,
+                reply_markup={"inline_keyboard": about_kb},
+                uname=uname
+            )
+            return
+
+        # 10d. Invite Partner
+        if text in ("📤 Пригласить партнёра", "/invite", "пригласить партнёра", "пригласить") or text.startswith("/invite"):
+            st = get_user_full_state(uname)
+            inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
+            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
+            invite_msg = (
+                "🔗 <b>Приглашение партнёра</b> 💕\n\n"
+                f"Ваш персональный код пары: <code>{inv_code}</code>\n\n"
+                "Отправьте этот код второй половинке или перешлите готовую ссылку-приглашение:"
+            )
+            tg_send_message(
+                chat_id,
+                invite_msg,
+                reply_markup={"inline_keyboard": [
+                    [{"text": "📤 Поделиться ссылкой", "url": share_url}],
+                    [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]
+                ]},
+                uname=uname
+            )
+            return
+
+        # 10e. Support button from keyboard
+        if text in ("💬 Связь с разработчиком", "связь с разработчиком", "поддержка"):
+            with db_lock:
+                conn = get_db()
+                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (chat_id, time.time()))
+                conn.commit()
+                conn.close()
+            tg_send_message(
+                chat_id,
+                "💬 <b>Связь с разработчиком</b>\n\n"
+                "Напишите ваш вопрос, пожелание или предложение одним сообщением — "
+                "оно сразу будет передано разработчику:",
+                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]], "resize_keyboard": True},
+                uname=uname
+            )
+            return
+
+        # 11. Default fallback message
+        st = get_user_full_state(uname)
+        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
+        tg_send_message(
+            chat_id,
+            f"✨ <b>Приложение «Двое» 💕</b>\n\n🔗 Ваш код пары: <code>{inv_code}</code>\n\nИспользуйте кнопки меню внизу для быстрого доступа!",
+            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
+            uname=uname
+        )
+
+
 def telegram_polling_worker():
     """Bot worker: handles /start (with pair_<code>), /pair, /unlink, /support tickets & callbacks."""
     offset = 0
@@ -1605,1298 +2898,7 @@ def telegram_polling_worker():
 
             for upd in res.get("result", []):
                 offset = max(offset, upd["update_id"] + 1)
-
-                # Handle Callback Queries
-                if "callback_query" in upd:
-                    cq = upd["callback_query"]
-                    cq_id = cq["id"]
-                    from_u = cq.get("from", {})
-                    chat_id = from_u.get("id")
-                    ensure_chat_menu_button(chat_id)
-                    raw_u = from_u.get("username") or ""
-                    d_name = from_u.get("first_name") or ""
-                    u_row = ensure_user(raw_u, display_name=d_name, tg_id=chat_id)
-                    uname = u_row["username"] if (u_row and u_row.get("username")) else normalize_username(raw_u or f"user_{chat_id}")
-                    data = cq.get("data", "")
-
-                    tg_api_call("answerCallbackQuery", {"callback_query_id": cq_id})
-
-                    if data == "enter_pair_code":
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("INSERT OR REPLACE INTO pair_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_code', ?)", (chat_id, time.time()))
-                            conn.commit()
-                            conn.close()
-                        st = get_user_full_state(uname)
-                        u_info = st["user"] if st else {}
-                        my_code = u_info.get("inviteCode", "PAIR-XXXXXX")
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {my_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{my_code}&text={share_text}"
-                        tg_send_message(
-                            chat_id,
-                            "🔗 <b>Привязка партнёра</b>\n\n"
-                            f"Ваш персональный код: <code>{my_code}</code>\n\n"
-                            "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) ответным сообщением:",
-                            reply_markup={
-                                "inline_keyboard": [
-                                    [{"text": "📤 Поделиться моим кодом", "url": share_url}],
-                                    [{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]
-                                ]
-                            },
-                            uname=uname
-                        )
-                    elif data == "cancel_pair_code":
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (chat_id,))
-                            conn.commit()
-                            conn.close()
-                        tg_send_message(chat_id, "Привязка отменена.", uname=uname)
-                    elif data == "support_prompt":
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (chat_id, time.time()))
-                            conn.commit()
-                            conn.close()
-                        tg_send_message(
-                            chat_id,
-                            "💬 <b>Связь с разработчиком</b>\n\n"
-                            "Напишите ваше пожелание, вопрос в поддержку или предложение о сотрудничестве одним сообщением — "
-                            "оно сразу будет передано разработчику:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
-                            uname=uname
-                        )
-                    elif data == "cancel_support":
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (chat_id,))
-                            conn.commit()
-                            conn.close()
-                        tg_send_message(chat_id, "Действие отменено.", uname=uname)
-                    elif data == "show_pair_code":
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        user_app_url = get_user_webapp_url(chat_id, uname)
-                        open_btn = [{"text": "💑 Открыть Двое", "web_app": {"url": user_app_url}}] if user_app_url.startswith("https://") else []
-                        inline_kb = [[{"text": "📤 Поделиться в Telegram", "url": share_url}]]
-                        if open_btn:
-                            inline_kb.append(open_btn)
-                        tg_send_message(
-                            chat_id,
-                            f"🔗 <b>Ваш код пары:</b> <code>{inv_code}</code>\n\n"
-                            f"Перешлите партнёру ссылку для быстрого подключения:\n"
-                            f"https://t.me/{BOT_USERNAME}?start=pair_{inv_code}",
-                            reply_markup={"inline_keyboard": inline_kb},
-                            uname=uname
-                        )
-                    elif data == "about_app":
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        user_app_url = get_user_webapp_url(chat_id, uname)
-                        about_kb = []
-                        if user_app_url.startswith("https://"):
-                            about_kb.append([{"text": "💑 Открыть «Двое»", "web_app": {"url": user_app_url}}])
-                        about_kb.append([
-                            {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
-                            {"text": "📤 Пригласить партнёра", "url": share_url}
-                        ])
-                        about_kb.append([
-                            {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"},
-                            {"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}
-                        ])
-                        tg_send_message(
-                            chat_id,
-                            ABOUT_APP_TEXT,
-                            reply_markup={"inline_keyboard": about_kb},
-                            uname=uname
-                        )
-                    elif data and (data.startswith("vp_get_creative") or data.startswith("vp_creative:")):
-                        code_arg = "partner"
-                        variant_arg = "a"
-                        if data.startswith("vp_creative:"):
-                            parts_c = data.split(":")
-                            if len(parts_c) > 1 and parts_c[1]:
-                                code_arg = parts_c[1]
-                            if len(parts_c) > 2 and parts_c[2]:
-                                variant_arg = parts_c[2]
-                        elif ":" in data:
-                            code_arg = data.split(":", 1)[1]
-
-                        var_titles = {
-                            "a": "Пост 1 — Нежный и романтичный 💕",
-                            "b": "Пост 2 — Жизненный и тёплый ✨",
-                            "c": "Пост 3 — Короткий нативный 🤍"
-                        }
-                        cur_title = var_titles.get(variant_arg, "Пост 1")
-                        post_raw = get_promo_creative_text(code_arg, variant_arg)
-                        creative_msg = (
-                            f"✨ <b>Готовый пост для канала ({cur_title}):</b>\n\n"
-                            f"<code>{html.escape(post_raw)}</code>\n\n"
-                            "<i>👆 Нажмите на текст выше, чтобы скопировать его в один клик. "
-                            "Вы можете опубликовать его вместе с баннером или скриншотами приложения!</i>"
-                        )
-                        kb_creative = [
-                            [
-                                {"text": ("• " if variant_arg == "a" else "") + "💕 Пост 1", "callback_data": f"vp_creative:{code_arg}:a"},
-                                {"text": ("• " if variant_arg == "b" else "") + "✨ Пост 2", "callback_data": f"vp_creative:{code_arg}:b"},
-                                {"text": ("• " if variant_arg == "c" else "") + "🤍 Пост 3", "callback_data": f"vp_creative:{code_arg}:c"}
-                            ],
-                            [{"text": "🖼 Скачать скриншоты приложения (2 шт.)", "callback_data": "vp_get_screens"}],
-                            [{"text": "⬅️ Назад в раздел сотрудничества", "callback_data": "vp_menu"}]
-                        ]
-
-                        if data.startswith("vp_get_creative") and os.path.exists(PROMO_BANNER_PATH):
-                            banner_caption = (
-                                "🎨 <b>Иллюстрация к посту для вашего канала (1280×720)</b> 💕\n"
-                                "<i>Ниже отправлен готовый текст поста с вашей персональной ссылкой:</i>"
-                            )
-                            tg_send_photo(chat_id, PROMO_BANNER_PATH, banner_caption, uname=uname)
-
-                        tg_send_message(chat_id, creative_msg, reply_markup={"inline_keyboard": kb_creative}, uname=uname)
-                    elif data == "vp_get_screens":
-                        if os.path.exists(PROMO_SCREEN_1_PATH):
-                            tg_send_photo(
-                                chat_id,
-                                PROMO_SCREEN_1_PATH,
-                                "📱 <b>Экран 1:</b> живой счётчик времени вместе до секунд и тёплые записки для второй половинки 💕",
-                                uname=uname
-                            )
-                        if os.path.exists(PROMO_SCREEN_2_PATH):
-                            tg_send_photo(
-                                chat_id,
-                                PROMO_SCREEN_2_PATH,
-                                "📱 <b>Экран 2:</b> бережная синхронизация настроения с пояснением и быстрыми знаками внимания ❤️",
-                                reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый текст поста", "callback_data": "vp_get_creative:partner"}]]},
-                                uname=uname
-                            )
-                    elif data == "vp_menu":
-                        vp_info_msg = (
-                            "🤝 <b>Сотрудничество и взаимная поддержка каналов 💕</b>\n\n"
-                            "Приглашаем к дружному бесплатному обмену аудиторией авторов уютных Telegram-каналов и блогов!\n\n"
-                            "✨ <b>Что получает ваш канал:</b>\n"
-                            "• <b>Новых вовлечённых подписчиков</b> — мы размещаем рекомендацию вашего канала с кнопкой подписки в боте и на главном экране приложения «Двое».\n"
-                            "• <b>Готовые нежные материалы</b> — вам не нужно тратить время на тексты и макеты, всё уже подготовлено ниже в один клик.\n"
-                            "• <b>Именную ссылку и статистику</b> — вы видите каждый переход в реальном времени.\n\n"
-                            "<i>Нажмите «🚀 Подключить мой канал», чтобы начать сотрудничество!</i>"
-                        )
-                        kb_menu = [
-                            [{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}],
-                            [{"text": "📥 Посмотреть готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
-                            [
-                                {"text": "💕 Пост 1", "callback_data": "vp_creative:partner:a"},
-                                {"text": "✨ Пост 2", "callback_data": "vp_creative:partner:b"},
-                                {"text": "🤍 Пост 3", "callback_data": "vp_creative:partner:c"}
-                            ],
-                            [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
-                            [
-                                {"text": "📊 Моя статистика", "callback_data": "vp_my_stats"},
-                                {"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}
-                            ]
-                        ]
-                        tg_send_message(chat_id, vp_info_msg, reply_markup={"inline_keyboard": kb_menu}, uname=uname)
-                    elif data == "vp_my_stats":
-                        matching = None
-                        with db_lock:
-                            conn = get_db()
-                            cur = conn.cursor()
-                            if uname:
-                                matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (uname,)).fetchone()
-                            conn.close()
-                        if matching:
-                            ch = dict(matching)
-                            tg_send_message(
-                                chat_id,
-                                f"📊 <b>Статистика вашего канала ({html.escape(ch['channel_title'])}):</b>\n\n"
-                                f"📢 <b>Канал:</b> {ch['channel_username']}\n"
-                                f"📌 <b>Код:</b> <code>{ch['code']}</code>\n"
-                                f"👥 <b>Уникальных переходов:</b> <b>{ch.get('clicks', 0)}</b>\n"
-                                f"🔗 <b>Ваша ссылка:</b>\nhttps://t.me/{BOT_USERNAME}?start=vp_{ch['code']}",
-                                reply_markup={"inline_keyboard": [
-                                    [{"text": "📥 Получить пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
-                                    [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}]
-                                ]},
-                                uname=uname
-                            )
-                        else:
-                            tg_send_message(
-                                chat_id,
-                                "📊 <b>Подключение персональной статистики</b> 💕\n\n"
-                                "Чтобы получить именную ссылку со счётчиком переходов и добавить ваш канал в блок рекомендаций «Двое», нажмите кнопку ниже и отправьте ссылку на ваш канал!\n\n"
-                                "<i>Если у вас уже есть персональный код, просто отправьте:</i> <code>/vp ваш_код</code>",
-                                reply_markup={"inline_keyboard": [[{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}]]},
-                                uname=uname
-                            )
-                    elif data == "vp_apply_ticket":
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_vp_application', ?)", (chat_id, time.time()))
-                            conn.commit()
-                            conn.close()
-                        tg_send_message(
-                            chat_id,
-                            "🚀 <b>Подключение канала к сотрудничеству</b> 💕\n\n"
-                            "Отправьте ответным сообщением ссылку на ваш Telegram-канал (например, <code>@ваш_канал</code>) и короткое описание (1 предложение о чём ваш канал).\n\n"
-                            "Мы сразу добавим ваш канал в блок рекомендаций «Двое» и пришлём вашу именную ссылку!",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
-                            uname=uname
-                        )
-                    elif data == "vp_show_partner":
-                        partner_ch = get_random_active_promo_partner()
-                        if partner_ch:
-                            p_title = html.escape(partner_ch["channel_title"])
-                            p_desc = html.escape(partner_ch["channel_description"])
-                            p_desc_block = f"<i>{p_desc}</i>\n\n" if p_desc else ""
-                            p_u = partner_ch["channel_username"].lstrip("@")
-                            tg_send_message(
-                                chat_id,
-                                f"✨ <b>Рекомендуемый канал друзей «Двое» 💕</b>\n\n"
-                                f"📢 <b><a href=\"https://t.me/{p_u}\">{p_title}</a></b>\n"
-                                f"{p_desc_block}"
-                                f"👉 <a href=\"https://t.me/{p_u}\">Перейти в канал</a>",
-                                reply_markup={"inline_keyboard": [[{"text": f"📢 Открыть {p_title}", "url": f"https://t.me/{p_u}"}]]},
-                                uname=uname
-                            )
-                        else:
-                            tg_send_message(
-                                chat_id,
-                                "✨ <b>Пример карточки вашего канала в «Двое» 💕</b>\n\n"
-                                "Вот так аккуратно и нативно рекомендация вашего канала отображается для всех наших пользователей в боте и на главном экране приложения:\n\n"
-                                "━━━━━━━━━━━━━━━\n"
-                                "✨ <b>Рекомендуем канал: Уютный уголок</b>\n"
-                                "<i>Тёплые мысли, эстетика и вдохновение для двоих на каждый день 🤍</i>\n"
-                                "━━━━━━━━━━━━━━━\n\n"
-                                "Нажмите кнопку ниже, чтобы подключить ваш канал к рекомендациям!",
-                                reply_markup={"inline_keyboard": [[{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}]]},
-                                uname=uname
-                            )
-                    elif data and data.startswith("vp_adm_"):
-                        if chat_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Доступно только администратору.", uname=uname)
-                            continue
-                        if data == "vp_adm_refresh":
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
-                        elif data == "vp_adm_add_prompt":
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_admin_add_vp', ?)", (chat_id, time.time()))
-                                conn.commit()
-                                conn.close()
-                            tg_send_message(
-                                chat_id,
-                                "➕ <b>Добавление нового канала к сотрудничеству</b>\n\n"
-                                "Отправьте одним сообщением данные канала через вертикальную черту <code>|</code>:\n"
-                                "<code>@юзернейм | Название канала | Короткое описание</code>\n\n"
-                                "<i>Пример:</i>\n"
-                                "<code>@blogtpdevochki | блог девочки ❄️ | Уютный лайф-блог про жизнь, учёбу и атмосферу</code>",
-                                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]},
-                                uname=uname
-                            )
-                        elif data == "vp_adm_pause_all":
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute("UPDATE promo_channels SET active = 0")
-                                conn.commit()
-                                conn.close()
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, "⏸ <b>Все показы партнёрских каналов приостановлены.</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        elif data == "vp_adm_resume_all":
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute("UPDATE promo_channels SET active = 1")
-                                conn.commit()
-                                conn.close()
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, "▶️ <b>Все партнёрские каналы снова включены!</b>\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        elif data == "vp_adm_overall_stats":
-                            with db_lock:
-                                conn = get_db()
-                                cur = conn.cursor()
-                                total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
-                                paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
-                                active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
-                                promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
-                                conn.close()
-                            total_pairs = paired_users // 2
-                            tg_send_message(
-                                chat_id,
-                                f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
-                                f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
-                                f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
-                                f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
-                                f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>",
-                                reply_markup={"inline_keyboard": [[{"text": "🎛 Назад в панель управления ВП", "callback_data": "vp_adm_refresh"}]]},
-                                uname=uname
-                            )
-                        elif data.startswith("vp_adm_pause:"):
-                            code_arg = data.split(":", 1)[1]
-                            deactivate_promo_channel(code_arg)
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_arg)}</code> приостановлено (канал скрыт из рекомендаций).\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        elif data.startswith("vp_adm_resume:"):
-                            code_arg = data.split(":", 1)[1]
-                            activate_promo_channel(code_arg)
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_arg)}</code> возобновлено (канал снова в рекомендациях)!\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        elif data.startswith("vp_adm_del:"):
-                            code_arg = data.split(":", 1)[1]
-                            delete_promo_channel_permanently(code_arg)
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_arg)}</code> полностью удалён из базы.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        elif data.startswith("vp_adm_quick_approve:"):
-                            # Format: vp_adm_quick_approve:<applicant_tg_id>:<channel_username>
-                            parts_qa = data.split(":")
-                            app_uid = int(parts_qa[1]) if len(parts_qa) > 1 and parts_qa[1].isdigit() else 0
-                            ch_u = parts_qa[2] if len(parts_qa) > 2 else ""
-                            if ch_u:
-                                ch_info = add_or_update_promo_channel(ch_u, f"Канал @{ch_u.lstrip('@')}", "Уютный авторский Telegram-канал")
-                                ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
-                                p_text, p_kb = build_vpadmin_panel()
-                                tg_send_message(
-                                    chat_id,
-                                    f"✅ <b>Канал {ch_info['channel_username']} подключён в один клик!</b>\n"
-                                    f"🔗 Ссылка: {ref_link}\n\n" + p_text,
-                                    reply_markup=p_kb,
-                                    uname=uname
-                                )
-                                if app_uid:
-                                    tg_send_message(
-                                        app_uid,
-                                        f"🎉 <b>Ваш канал {ch_info['channel_username']} подключён к сотрудничеству с «Двое»!</b> 💕\n\n"
-                                        f"Теперь ваш канал отображается в рекомендациях для наших пользователей.\n\n"
-                                        f"🔗 <b>Ваша именная ссылка для поста:</b>\n{ref_link}\n\n"
-                                        "Нажмите кнопку ниже, чтобы получить готовый пост и баннер:",
-                                        reply_markup={"inline_keyboard": [[{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch_info['code']}"}]]}
-                                    )
-                    continue
-
-                # Handle Messages
-                if "message" in upd:
-                    msg = upd["message"]
-                    chat_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
-                    from_user = msg.get("from", {})
-                    tg_id = from_user.get("id") or chat_id
-                    raw_u = from_user.get("username") or ""
-                    first_name = from_user.get("first_name") or ""
-                    u_row = ensure_user(raw_u, display_name=first_name, tg_id=tg_id)
-                    uname = u_row["username"] if (u_row and u_row.get("username")) else normalize_username(raw_u or f"user_{tg_id}")
-                    ensure_chat_menu_button(chat_id)
-
-                    text = (msg.get("text") or "").strip()
-                    webapp_url = get_current_webapp_url()
-                    user_webapp_url = f"{webapp_url}?tg_user={uname}&tg_id={tg_id}" if (webapp_url and webapp_url.startswith("https://")) else webapp_url
-
-                    KNOWN_MENU_ACTIONS = {
-                        "💑 Открыть «Двое»", "🔗 Привязать партнёра", "📤 Пригласить партнёра",
-                        "📖 О приложении", "💬 Связь с разработчиком", "💌 Послать знак внимания",
-                        "ℹ️ Мой статус", "🤝 Сотрудничество и ВП", "🤝 Взаимный пиар"
-                    }
-
-                    # 1. Admin Reply to Support Ticket Forwarding
-                    if tg_id == ADMIN_TG_ID and msg.get("reply_to_message") and not text.startswith("/"):
-                        orig = msg["reply_to_message"].get("text", "")
-                        m_uid = re.search(r"TG ID:\s*<code>?(\d+)</code>?", orig)
-                        if m_uid:
-                            user_dest_id = int(m_uid.group(1))
-                            tg_send_message(
-                                user_dest_id,
-                                f"📬 <b>👨‍💻 Ответ разработчика «Двое»:</b>\n\n{text}\n\n<i>Приятного пользования приложением! 💕</i>",
-                                reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(user_dest_id)}}]]}
-                            )
-                            tg_send_message(ADMIN_TG_ID, f"✅ Ответ успешно передан пользователю (TG ID: <code>{user_dest_id}</code>).")
-                            continue
-
-                    # 2. Check Support Session or Admin Interactive VP Add Session
-                    in_support = False
-                    is_vp_app = False
-                    is_admin_add_vp = False
-                    with db_lock:
-                        conn = get_db()
-                        sess = conn.execute("SELECT state, updated_at FROM support_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
-                        if sess and sess["state"] in ("awaiting_ticket", "awaiting_vp_application", "awaiting_admin_add_vp"):
-                            if time.time() - (sess["updated_at"] or 0) < 900:
-                                in_support = True
-                                is_vp_app = (sess["state"] == "awaiting_vp_application")
-                                is_admin_add_vp = (sess["state"] == "awaiting_admin_add_vp")
-                            else:
-                                conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
-                                conn.commit()
-                        conn.close()
-
-                    if in_support and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
-                            conn.commit()
-                            conn.close()
-                        in_support = False
-
-                    if in_support and is_admin_add_vp and tg_id == ADMIN_TG_ID:
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
-                            conn.commit()
-                            conn.close()
-                        parts = [p.strip() for p in text.split("|")]
-                        if len(parts) >= 2:
-                            ch_u = parts[0]
-                            ch_title = parts[1]
-                            ch_desc = parts[2] if len(parts) > 2 else ""
-                        else:
-                            # Allow single @username input with sensible defaults
-                            ch_u = parts[0].split()[0]
-                            ch_title = parts[0]
-                            ch_desc = "Уютный авторский Telegram-канал"
-                        ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
-                        p_text, p_kb = build_vpadmin_panel()
-                        tg_send_message(
-                            chat_id,
-                            f"✅ <b>Канал {ch_info['channel_username']} успешно добавлен и включён!</b>\n"
-                            f"🔗 Ссылка для партнёра: https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}\n\n" + p_text,
-                            reply_markup=p_kb,
-                            uname=uname
-                        )
-                        continue
-
-                    if in_support:
-                        cat = "vp_partnership" if is_vp_app else "support"
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute(
-                                "INSERT INTO support_tickets (tg_id, username, display_name, message, message_text, category, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'new')",
-                                (tg_id, uname, first_name, text, text, cat, time.time())
-                            )
-                            conn.execute("DELETE FROM support_sessions WHERE tg_id = ?", (tg_id,))
-                            conn.commit()
-                            conn.close()
-
-                        # Forward to admin (suppress for test/stress users)
-                        if not uname.startswith(("test_", "stress_")):
-                            prefix_title = "🤝 <b>Новая заявка на Взаимный Пиар (ВП)!</b>" if is_vp_app else "📩 <b>Новое обращение в «Двое»!</b>"
-                            admin_msg = (
-                                f"{prefix_title}\n\n"
-                                f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
-                                f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
-                                f"💬 <b>Текст:</b>\n{html.escape(text)}"
-                            )
-                            admin_kb = None
-                            if is_vp_app:
-                                m_ch = re.search(r"(?:@|(?:t\.me|telegram\.me)/)([a-zA-Z0-9_]{4,32})", text)
-                                if m_ch:
-                                    extracted_ch = m_ch.group(1)
-                                    admin_kb = {
-                                        "inline_keyboard": [
-                                            [{"text": f"✅ Подключить @{extracted_ch} в 1 клик", "callback_data": f"vp_adm_quick_approve:{tg_id}:{extracted_ch}"}],
-                                            [{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]
-                                        ]
-                                    }
-                                else:
-                                    admin_kb = {"inline_keyboard": [[{"text": "🎛 Открыть панель ВП", "callback_data": "vp_adm_refresh"}]]}
-                            tg_send_message(ADMIN_TG_ID, admin_msg, reply_markup=admin_kb)
-
-                        # Confirm to user
-                        confirm_text = (
-                            "✅ <b>Спасибо!</b> Ваша заявка на взаимный пиар получена разработчиком 💕\n"
-                            "Мы свяжемся с вами в ближайшее время прямо здесь в боте."
-                            if is_vp_app else
-                            "✅ <b>Спасибо!</b> Ваше сообщение успешно отправлено разработчику 💕\n"
-                            "Мы ответим вам в ближайшее время прямо здесь в боте."
-                        )
-                        tg_send_message(
-                            chat_id,
-                            confirm_text,
-                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                            uname=uname
-                        )
-                        continue
-
-                    # 3. Check Pair Session OR Direct Code Input
-                    in_pair_session = False
-                    with db_lock:
-                        conn = get_db()
-                        psess = conn.execute("SELECT state, updated_at FROM pair_sessions WHERE tg_id = ?", (tg_id,)).fetchone()
-                        if psess and psess["state"] == "awaiting_code":
-                            if time.time() - (psess["updated_at"] or 0) < 900:
-                                in_pair_session = True
-                            else:
-                                conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
-                                conn.commit()
-                        conn.close()
-
-                    if in_pair_session and (text.startswith("/") or text in KNOWN_MENU_ACTIONS):
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
-                            conn.commit()
-                            conn.close()
-                        in_pair_session = False
-
-                    extracted_code = ""
-                    m_pair = re.search(r"\b(PAIR-[A-Z0-9]{6})\b", text, re.IGNORECASE)
-                    if m_pair:
-                        extracted_code = m_pair.group(1).upper()
-                    elif in_pair_session and not text.startswith("/"):
-                        cleaned = text.strip().upper()
-                        if re.match(r"^[A-Z0-9]{6}$", cleaned):
-                            extracted_code = f"PAIR-{cleaned}"
-                        elif re.match(r"^PAIR-[A-Z0-9]{6}$", cleaned):
-                            extracted_code = cleaned
-
-                    if extracted_code:
-                        with db_lock:
-                            conn = get_db()
-                            cur = conn.cursor()
-                            target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (extracted_code, uname)).fetchone()
-                            conn.execute("DELETE FROM pair_sessions WHERE tg_id = ?", (tg_id,))
-                            conn.commit()
-                            conn.close()
-
-                        if not target:
-                            tg_send_message(
-                                chat_id,
-                                "❌ Партнёр с таким кодом не найден. Проверьте правильность кода и попробуйте снова:",
-                                reply_markup={"inline_keyboard": [[{"text": "🔄 Ввести код снова", "callback_data": "enter_pair_code"}]]},
-                                uname=uname
-                            )
-                            continue
-
-                        target_uname = target["username"]
-                        # Anti-Hijacking verification: caller or target already in a pair
-                        caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
-                        if caller_partner and caller_partner != target_uname:
-                            tg_send_message(
-                                chat_id,
-                                "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            continue
-
-                        if target.get("partner_username") and target.get("partner_username") != uname:
-                            tg_send_message(
-                                chat_id,
-                                "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            continue
-
-                        paired = pair_users(uname, target_uname)
-                        if paired:
-                            target_display = (target.get("display_name") or target_uname).strip()
-                            caller_display = (first_name or uname).strip()
-                            tg_send_message(
-                                chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
-                                "Откройте приложение «Двое», чтобы видеть общий счётчик и настроение партнёра!",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            if target.get("tg_id"):
-                                tg_send_message(
-                                    target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
-                                    reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
-                                    uname=target_uname
-                                )
-                        else:
-                            tg_send_message(chat_id, "❌ Не удалось привязать пару. Попробуйте позже.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
-                        continue
-
-                    # If user is in pair session but typed an invalid code (and didn't select a menu button)
-                    if in_pair_session and not text.startswith("/") and text not in KNOWN_MENU_ACTIONS:
-                        tg_send_message(
-                            chat_id,
-                            "⚠️ <b>Неверный формат кода.</b>\n\n"
-                            "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code> или 6 символов <code>777LOVE</code>) либо нажмите «❌ Отмена»:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]]},
-                            uname=uname
-                        )
-                        continue
-
-                    # 3b. Admin Command: /addvp <channel_username> | <Название> | <Описание>
-                    if text.startswith("/addvp"):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        raw_args = text[len("/addvp"):].strip()
-                        parts = [p.strip() for p in raw_args.split("|")]
-                        if len(parts) >= 2:
-                            ch_u = parts[0]
-                            ch_title = parts[1]
-                            ch_desc = parts[2] if len(parts) > 2 else ""
-                            ch_info = add_or_update_promo_channel(ch_u, ch_title, ch_desc)
-                            ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch_info['code']}"
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(
-                                chat_id,
-                                f"✅ <b>Партнёрский канал успешно добавлен!</b>\n\n"
-                                f"📌 <b>Код:</b> <code>{ch_info['code']}</code>\n"
-                                f"📢 <b>Канал:</b> {ch_info['channel_username']}\n"
-                                f"🏷 <b>Название:</b> {html.escape(ch_info['channel_title'])}\n"
-                                f"📝 <b>Описание:</b> {html.escape(ch_info['channel_description'])}\n"
-                                f"🔗 <b>Реферальная ссылка:</b>\n{ref_link}\n\n" + p_text,
-                                reply_markup=p_kb,
-                                uname=uname
-                            )
-                        else:
-                            tg_send_message(
-                                chat_id,
-                                "⚠️ <b>Использование:</b>\n<code>/addvp @username | Название канала | Краткое описание</code>\n\n"
-                                "Пример:\n<code>/addvp @love_notes | Дневник чувств | Эстетичные цитаты и мысли о любви</code>\n\n"
-                                "Либо нажмите кнопку ниже для интерактивного добавления:",
-                                reply_markup={"inline_keyboard": [[{"text": "➕ Добавить канал интерактивно", "callback_data": "vp_adm_add_prompt"}]]},
-                                uname=uname
-                            )
-                        continue
-
-                    # 3c. Admin Command: /delvp or /pausevp <code> (pauses channel)
-                    if text.startswith(("/delvp", "/pausevp", "/stopvp")):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        cmd_used = text.split()[0]
-                        code_to_del = text[len(cmd_used):].strip()
-                        if not code_to_del:
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
-                            continue
-                        deactivated = deactivate_promo_channel(code_to_del)
-                        p_text, p_kb = build_vpadmin_panel()
-                        if deactivated:
-                            tg_send_message(chat_id, f"⏸ Сотрудничество с <code>{html.escape(code_to_del)}</code> приостановлено.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        else:
-                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_del)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        continue
-
-                    # 3c2. Admin Command: /resumevp <code> (resumes paused channel)
-                    if text.startswith(("/resumevp", "/startvp")):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        cmd_used = text.split()[0]
-                        code_to_res = text[len(cmd_used):].strip()
-                        if not code_to_res:
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
-                            continue
-                        resumed = activate_promo_channel(code_to_res)
-                        p_text, p_kb = build_vpadmin_panel()
-                        if resumed:
-                            tg_send_message(chat_id, f"▶️ Сотрудничество с <code>{html.escape(code_to_res)}</code> возобновлено!\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        else:
-                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_res)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        continue
-
-                    # 3c3. Admin Command: /removevp <code> (permanently deletes channel)
-                    if text.startswith("/removevp"):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        code_to_rm = text[len("/removevp"):].strip()
-                        if not code_to_rm:
-                            p_text, p_kb = build_vpadmin_panel()
-                            tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
-                            continue
-                        removed = delete_promo_channel_permanently(code_to_rm)
-                        p_text, p_kb = build_vpadmin_panel()
-                        if removed:
-                            tg_send_message(chat_id, f"🗑 Канал <code>{html.escape(code_to_rm)}</code> полностью удалён.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        else:
-                            tg_send_message(chat_id, f"❌ Канал <code>{html.escape(code_to_rm)}</code> не найден.\n\n" + p_text, reply_markup=p_kb, uname=uname)
-                        continue
-
-                    # 3d. Admin Command: /vpstats or /vpadmin (Interactive 1-click collaboration control panel)
-                    if text in ("/vpstats", "/vpadmin", "статистика вп", "панель вп", "управление вп") or text.startswith("/vpadmin"):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        p_text, p_kb = build_vpadmin_panel()
-                        tg_send_message(chat_id, p_text, reply_markup=p_kb, uname=uname)
-                        continue
-
-                    # 3d2. Admin Command: /stats or /adminstats (Overall bot user base & pairs)
-                    if text in ("/stats", "/adminstats", "статистика", "пользователи") or text.startswith("/stats"):
-                        if tg_id != ADMIN_TG_ID:
-                            tg_send_message(chat_id, "⛔️ Команда доступна только администратору.", uname=uname)
-                            continue
-                        with db_lock:
-                            conn = get_db()
-                            cur = conn.cursor()
-                            total_users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
-                            paired_users = cur.execute("SELECT COUNT(*) FROM users WHERE partner_username IS NOT NULL AND partner_username != ''").fetchone()[0] or 0
-                            active_today = cur.execute("SELECT COUNT(*) FROM users WHERE last_active > ?", (time.time() - 86400,)).fetchone()[0] or 0
-                            promo_clicks = cur.execute("SELECT COUNT(*) FROM promo_referrals").fetchone()[0] or 0
-                            conn.close()
-
-                        total_pairs = paired_users // 2
-                        stats_msg = (
-                            f"📊 <b>Статистика приложения «Двое»</b> 💕\n\n"
-                            f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n"
-                            f"💑 <b>Сформировано пар:</b> <code>{total_pairs}</code> ({paired_users} чел.)\n"
-                            f"⚡️ <b>Активных за 24 часа:</b> <code>{active_today}</code>\n"
-                            f"🔗 <b>Переходов по партнёрским ВП-ссылкам:</b> <code>{promo_clicks}</code>\n\n"
-                            f"<i>Управлять партнёрскими каналами в 1 клик можно через кнопку ниже или команду /vpadmin</i>"
-                        )
-                        tg_send_message(
-                            chat_id,
-                            stats_msg,
-                            reply_markup={"inline_keyboard": [[{"text": "🎛 Управление каналами ВП", "callback_data": "vp_adm_refresh"}]]},
-                            uname=uname
-                        )
-                        continue
-
-                    # 3e. Command: /vp (Mutual PR / Cross-Promo portal)
-                    if text in ("/vp", "вп", "🤝 взаимный пиар", "🤝 сотрудничество и вп", "🤝 сотрудничество", "сотрудничество", "/promo") or text.lower() in ("🤝 сотрудничество и вп", "🤝 взаимный пиар", "сотрудничество и вп") or text.startswith("/vp"):
-                        vp_code_arg = text[len("/vp"):].strip() if text.startswith("/vp") else ""
-                        matching = None
-                        if vp_code_arg:
-                            norm = normalize_promo_code(vp_code_arg)
-                            with db_lock:
-                                conn = get_db()
-                                cur = conn.cursor()
-                                matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(code) = LOWER(?)", (norm,)).fetchone()
-                                if not matching:
-                                    clean_u = norm.lstrip("@").lower()
-                                    matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = ?", (clean_u,)).fetchone()
-                                conn.close()
-                        elif uname:
-                            with db_lock:
-                                conn = get_db()
-                                cur = conn.cursor()
-                                matching = cur.execute("SELECT * FROM promo_channels WHERE LOWER(REPLACE(channel_username, '@', '')) = LOWER(?)", (uname,)).fetchone()
-                                conn.close()
-
-                        if matching:
-                            ch = dict(matching)
-                            ref_link = f"https://t.me/{BOT_USERNAME}?start=vp_{ch['code']}"
-                            vp_info_msg = (
-                                f"🤝 <b>Кабинет партнёра: {html.escape(ch['channel_title'])}</b> 💕\n\n"
-                                f"📢 <b>Ваш канал:</b> {ch['channel_username']}\n"
-                                f"📌 <b>Персональный код:</b> <code>{ch['code']}</code>\n"
-                                f"👥 <b>Приведено пользователей:</b> <b>{ch.get('clicks', 0)}</b>\n\n"
-                                f"🔗 <b>Ваша именная ссылка для поста:</b>\n{ref_link}\n\n"
-                                "<i>Ниже вы можете в один клик получить готовые нежные макеты и тексты для публикации:</i>"
-                            )
-                            kb = [
-                                [{"text": "📥 Получить готовый пост и баннер", "callback_data": f"vp_get_creative:{ch['code']}"}],
-                                [
-                                    {"text": "💕 Пост 1", "callback_data": f"vp_creative:{ch['code']}:a"},
-                                    {"text": "✨ Пост 2", "callback_data": f"vp_creative:{ch['code']}:b"},
-                                    {"text": "🤍 Пост 3", "callback_data": f"vp_creative:{ch['code']}:c"}
-                                ],
-                                [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
-                                [{"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}],
-                                [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
-                            ]
-                        else:
-                            vp_info_msg = (
-                                "🤝 <b>Сотрудничество и взаимная поддержка каналов 💕</b>\n\n"
-                                "Приглашаем к дружному бесплатному обмену аудиторией авторов уютных Telegram-каналов и блогов!\n\n"
-                                "✨ <b>Что получает ваш канал:</b>\n"
-                                "• <b>Новых вовлечённых подписчиков</b> — мы размещаем рекомендацию вашего канала с кнопкой подписки в боте и на главном экране приложения «Двое».\n"
-                                "• <b>Готовые нежные материалы</b> — вам не нужно тратить время на тексты и макеты, всё уже подготовлено ниже в один клик.\n"
-                                "• <b>Именную ссылку и статистику</b> — вы видите каждый переход в реальном времени.\n\n"
-                                "<i>Нажмите «🚀 Подключить мой канал», чтобы начать сотрудничество!</i>"
-                            )
-                            kb = [
-                                [{"text": "🚀 Подключить мой канал", "callback_data": "vp_apply_ticket"}],
-                                [{"text": "📥 Посмотреть готовый пост и баннер", "callback_data": "vp_get_creative:partner"}],
-                                [
-                                    {"text": "💕 Пост 1", "callback_data": "vp_creative:partner:a"},
-                                    {"text": "✨ Пост 2", "callback_data": "vp_creative:partner:b"},
-                                    {"text": "🤍 Пост 3", "callback_data": "vp_creative:partner:c"}
-                                ],
-                                [{"text": "🖼 Скачать скриншоты приложения", "callback_data": "vp_get_screens"}],
-                                [
-                                    {"text": "📊 Моя статистика", "callback_data": "vp_my_stats"},
-                                    {"text": "✨ Пример рекомендации", "callback_data": "vp_show_partner"}
-                                ]
-                            ]
-                        tg_send_message(chat_id, vp_info_msg, reply_markup={"inline_keyboard": kb}, uname=uname)
-                        continue
-
-                    # 4. Command: /support
-                    if text.startswith("/support"):
-                        inline_text = text[len("/support"):].strip()
-                        if inline_text:
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute(
-                                    "INSERT INTO support_tickets (tg_id, username, display_name, message, message_text, category, created_at, status) VALUES (?, ?, ?, ?, ?, 'support', ?, 'new')",
-                                    (tg_id, uname, first_name, inline_text, inline_text, time.time())
-                                )
-                                conn.commit()
-                                conn.close()
-                            if not uname.startswith(("test_", "stress_")):
-                                admin_msg = (
-                                    f"📩 <b>Новое обращение в «Двое»!</b>\n\n"
-                                    f"👤 <b>От:</b> {html.escape(first_name)} (@{html.escape(uname)})\n"
-                                    f"🆔 <b>TG ID:</b> <code>{tg_id}</code>\n\n"
-                                    f"💬 <b>Текст:</b>\n{html.escape(inline_text)}"
-                                )
-                                tg_send_message(ADMIN_TG_ID, admin_msg)
-                            tg_send_message(
-                                chat_id,
-                                "✅ <b>Спасибо!</b> Ваше обращение передано разработчику 💕",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                        else:
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (tg_id, time.time()))
-                                conn.commit()
-                                conn.close()
-                            tg_send_message(
-                                chat_id,
-                                "💬 <b>Связь с разработчиком</b>\n\n"
-                                "Напишите ваш вопрос, пожелание или предложение одним сообщением — "
-                                "оно сразу будет передано разработчику:",
-                                reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]]}
-                            )
-                        continue
-
-                    # 5. Command: /pair <code> or Menu Button "🔗 Привязать партнёра"
-                    if text in ("🔗 Привязать партнёра", "привязать партнёра", "привязать", "/pair") or text.startswith("/pair"):
-                        code = text[len("/pair"):].strip().upper() if text.startswith("/pair") else ""
-                        if not code:
-                            st = get_user_full_state(uname)
-                            user = st["user"] if st else {}
-                            partner = st.get("partner") if st else None
-                            inv_code = user.get("inviteCode", "PAIR-XXXXXX")
-                            share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-
-                            if partner:
-                                partner_name = html.escape((partner.get("displayName") or f"@{partner.get('username')}").strip())
-                                tg_send_message(
-                                    chat_id,
-                                    f"💕 <b>У вас уже привязана пара!</b>\n\n"
-                                    f"Ваша вторая половинка: <b>{partner_name}</b> (@{partner.get('username')}).\n\n"
-                                    "Если вы хотите подключить другого человека, сначала отвяжите текущую пару с помощью команды /unlink.",
-                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                    uname=uname
-                                )
-                                continue
-
-                            with db_lock:
-                                conn = get_db()
-                                conn.execute("INSERT OR REPLACE INTO pair_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_code', ?)", (tg_id, time.time()))
-                                conn.commit()
-                                conn.close()
-
-                            msg = (
-                                "🔗 <b>Привязка партнёра</b>\n\n"
-                                f"Ваш персональный код: <code>{inv_code}</code>\n\n"
-                                "Отправьте код вашей второй половинки (например: <code>PAIR-777LOVE</code>) следующим сообщением:"
-                            )
-                            kb = [
-                                [{"text": "📤 Поделиться моим кодом", "url": share_url}],
-                                [{"text": "❌ Отмена", "callback_data": "cancel_pair_code"}]
-                            ]
-                            tg_send_message(
-                                chat_id,
-                                msg,
-                                reply_markup={"inline_keyboard": kb},
-                                uname=uname
-                            )
-                            continue
-
-                        with db_lock:
-                            conn = get_db()
-                            cur = conn.cursor()
-                            target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (code, uname)).fetchone()
-                            conn.close()
-
-                        if not target:
-                            tg_send_message(chat_id, "❌ Партнёр с таким кодом не найден. Проверьте правильность кода.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
-                            continue
-
-                        target_uname = target["username"]
-                        # Anti-Hijacking verification: caller or target already in a pair
-                        caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
-                        if caller_partner and caller_partner != target_uname:
-                            tg_send_message(
-                                chat_id,
-                                "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            continue
-
-                        if target.get("partner_username") and target.get("partner_username") != uname:
-                            tg_send_message(
-                                chat_id,
-                                "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            continue
-
-                        paired = pair_users(uname, target_uname)
-                        if paired:
-                            target_display = (target.get("display_name") or target_uname).strip()
-                            caller_display = (first_name or uname).strip()
-                            tg_send_message(
-                                chat_id,
-                                f"🎉 <b>Поздравляем!</b> Вы успешно соединились с <b>{html.escape(target_display)}</b> 💕\n\n"
-                                "Откройте приложение, чтобы увидеть ваш общий счётчик времени и настроение партнёра!",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                            if target.get("tg_id"):
-                                tg_send_message(
-                                    target["tg_id"],
-                                    f"🎉 <b>Поздравляем!</b> <b>{html.escape(caller_display)}</b> соединился(-ась) с вами в приложении «Двое» 💕",
-                                    reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
-                                    uname=target_uname
-                                )
-                        continue
-
-                    # 6. Command: /unlink
-                    if text.startswith("/unlink"):
-                        p_uname = unlink_user(uname)
-                        if p_uname:
-                            with db_lock:
-                                conn = get_db()
-                                p = conn.execute("SELECT tg_id FROM users WHERE username = ?", (p_uname,)).fetchone()
-                                conn.close()
-                            tg_send_message(chat_id, "💔 Вы отвязали партнёра. Теперь вы можете подключить новую пару.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
-                            if p and p["tg_id"]:
-                                tg_send_message(p["tg_id"], f"💔 Партнёр @{html.escape(uname)} отвязал пару.", reply_markup=get_main_reply_keyboard(chat_id=p["tg_id"], uname=p_uname), uname=p_uname)
-                        else:
-                            tg_send_message(chat_id, "У вас нет привязанного партнёра.", reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname), uname=uname)
-                        continue
-
-                    # 7. Command: /start (including /start pair_<code>, /start vp_<code>, /start ref_<code>)
-                    if text.startswith("/start"):
-                        parts = text.split()
-                        pair_param = parts[1] if len(parts) > 1 else ""
-
-                        # Cross-Promo referral tracking: /start vp_<code> or /start ref_<code>
-                        if pair_param.startswith("vp_") or pair_param.startswith("ref_"):
-                            record_promo_referral(tg_id, pair_param)
-
-                        paired_now = False
-                        inviter_name = ""
-                        if pair_param.startswith("pair_"):
-                            code = pair_param[len("pair_"):].strip().upper()
-                            with db_lock:
-                                conn = get_db()
-                                cur = conn.cursor()
-                                target = cur.execute("SELECT * FROM users WHERE invite_code = ? AND username != ?", (code, uname)).fetchone()
-                                conn.close()
-                            if target:
-                                target_uname = target["username"]
-                                inviter_name = (target["display_name"] or "").strip() or f"@{target_uname}"
-                                caller_partner = u_row["partner_username"] if (u_row and u_row.get("partner_username")) else None
-                                if caller_partner and caller_partner != target_uname:
-                                    tg_send_message(
-                                        chat_id,
-                                        "❌ Вы уже состоите в паре. Сначала необходимо отвязать текущую пару в настройках или командой /unlink.",
-                                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                        uname=uname
-                                    )
-                                elif target.get("partner_username") and target.get("partner_username") != uname:
-                                    tg_send_message(
-                                        chat_id,
-                                        "❌ Этот пользователь уже состоит в паре. Сначала необходимо отвязать текущую пару в настройках.",
-                                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                        uname=uname
-                                    )
-                                else:
-                                    if pair_users(uname, target_uname):
-                                        paired_now = True
-                                        if target.get("tg_id"):
-                                             caller_name = (first_name or uname).strip()
-                                             tg_send_message(
-                                                 target["tg_id"],
-                                                 f"🎉 <b>{html.escape(caller_name)}</b> перешёл(-ла) по вашей ссылке и соединился(-ась) с вами! 💕",
-                                                 reply_markup=get_main_reply_keyboard(chat_id=target["tg_id"], uname=target_uname),
-                                                 uname=target_uname
-                                             )
-
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-
-                        if paired_now:
-                            welcome = (
-                                f"🎉 <b>Вы успешно соединились с {html.escape(inviter_name)}!</b> 💕\n\n"
-                                "Теперь в приложении «Двое» вы можете:\n"
-                                "⏳ Отслеживать сколько вы вместе (годы, месяцы, дни, часы, минуты, секунды)\n"
-                                "💭 Видеть настроение друг друга в реальном времени с подробными пояснениями\n"
-                                "🖼 Менять и просматривать фотографии 1:1"
-                            )
-                        else:
-                            welcome = (
-                                "✨ <b>«Двое»</b> — эстетичное минималистичное пространство для любящей пары.\n\n"
-                                "Здесь вы сможете:\n"
-                                "⏳ <b>Точный счётчик времени вместе</b> — годы, месяцы, дни, часы, минуты и секунды\n"
-                                "💭 <b>Настроение партнёра</b> — статус в реальном времени с пояснениями, почему такое настроение\n"
-                                "🖼 <b>Фото 1:1</b> — профили с любимыми фотографиями\n\n"
-                                f"🔗 <b>Ваш код для пары:</b> <code>{inv_code}</code>"
-                            )
-
-                        kb = [
-                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
-                            [
-                                {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
-                                {"text": "📤 Пригласить партнёра", "url": share_url}
-                            ],
-                            [
-                                {"text": "📖 О приложении", "callback_data": "about_app"},
-                                {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"}
-                            ],
-                            [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
-                        ]
-
-                        tg_send_photo(chat_id, BANNER_IMAGE_PATH, welcome, reply_markup={"inline_keyboard": kb}, uname=uname)
-                        tg_send_message(
-                            chat_id,
-                            "💫 <b>Быстрое меню закреплено внизу экрана:</b> вы можете в любой момент отправить знак внимания или проверить статус!",
-                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                            uname=uname
-                        )
-                        continue
-
-                    # 8. Command: Nudge / Sign of Attention
-                    if text in ("💌 Послать знак внимания", "/nudge", "знак внимания") or text.startswith("/nudge") or "послать знак внимания" in text.lower():
-                        with db_lock:
-                            conn = get_db()
-                            cur = conn.cursor()
-                            u_row = cur.execute("SELECT display_name, partner_username FROM users WHERE username = ?", (uname,)).fetchone()
-                            p_uname = u_row["partner_username"] if u_row else None
-                            p_row = None
-                            if p_uname:
-                                p_row = cur.execute("SELECT tg_id, display_name FROM users WHERE username = ?", (p_uname,)).fetchone()
-                                cur.execute(
-                                    "UPDATE users SET mood_reaction = '❤️', mood_reaction_from = ?, mood_reaction_at = ? WHERE username = ?",
-                                    (uname, time.time(), p_uname)
-                                )
-                                conn.commit()
-                            conn.close()
-
-                        if not p_uname:
-                            tg_send_message(
-                                chat_id,
-                                "💔 <b>У вас пока нет привязанного партнёра.</b>\n\n"
-                                "Используйте команду /pair или передайте ваш код для подключения второй половинке.",
-                                reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                uname=uname
-                            )
-                        else:
-                            sender_name = html.escape(((u_row["display_name"] if u_row else None) or "").strip() or f"@{uname}")
-                            partner_name = html.escape(((p_row["display_name"] if p_row else None) or "").strip() or p_uname)
-                            if p_row and p_row["tg_id"]:
-                                tg_send_message(
-                                    p_row["tg_id"],
-                                    f"❤️ <b>{sender_name} думает о вас и шлёт вам знак внимания!</b> 💕",
-                                    reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": get_user_webapp_url(p_row['tg_id'], p_uname)}}]]},
-                                    uname=p_uname
-                                )
-                                tg_send_message(
-                                    chat_id,
-                                    f"❤️ <b>Знак внимания отправлен для {partner_name}!</b> 💕\n<i>Партнёр получит мгновенное уведомление в Telegram.</i>",
-                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                    uname=uname
-                                )
-                            else:
-                                tg_send_message(
-                                    chat_id,
-                                    f"❤️ <b>Знак внимания сохранён для {partner_name}!</b> 💕\n<i>Партнёр увидит его при входе в приложение.</i>",
-                                    reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                                    uname=uname
-                                )
-                        continue
-
-                    # 9. Command: Status
-                    if text in ("ℹ️ Мой статус", "/status", "мой статус") or text.startswith("/status") or "мой статус" in text.lower():
-                        st = get_user_full_state(uname)
-                        user = st["user"] if st else {}
-                        partner = st.get("partner")
-                        inv_code = user.get("inviteCode", "PAIR-XXXXXX")
-                        user_name = html.escape((user.get("displayName") or f"@{uname}").strip())
-                        user_mood = f"{user.get('moodEmoji', '🥰')} {html.escape(user.get('moodLabel', 'Люблю'))}"
-                        user_reason = html.escape((user.get("moodReason") or "").strip())
-
-                        if partner:
-                            p_name = html.escape((partner.get("displayName") or f"@{partner.get('username')}").strip())
-                            p_mood = f"{partner.get('moodEmoji', '🥰')} {html.escape(partner.get('moodLabel', 'Люблю'))}"
-                            p_reason = html.escape((partner.get("moodReason") or "").strip())
-                            rel_start = st.get("relationshipStart")
-                            days_str = ""
-                            if rel_start:
-                                try:
-                                    dt_rel = datetime.strptime(str(rel_start)[:10], "%Y-%m-%d")
-                                    days_cnt = max(0, (datetime.now() - dt_rel).days)
-                                    days_str = f"⏳ <b>Дней вместе:</b> {days_cnt} дн.\n"
-                                except Exception:
-                                    pass
-
-                            status_text = (
-                                f"💑 <b>Статус вашей пары</b>\n\n"
-                                f"👤 <b>Вы:</b> {user_name}\n"
-                                f"💭 <b>Ваше настроение:</b> {user_mood}" + (f"\n<i>«{user_reason}»</i>" if user_reason else "") + "\n\n"
-                                f"❤️ <b>Партнёр:</b> {p_name}\n"
-                                f"💭 <b>Настроение партнёра:</b> {p_mood}" + (f"\n<i>«{p_reason}»</i>" if p_reason else "") + "\n\n"
-                                f"{days_str}"
-                                f"🔗 <b>Код пары:</b> <code>{inv_code}</code>"
-                            )
-                        else:
-                            status_text = (
-                                f"ℹ️ <b>Ваш статус</b>\n\n"
-                                f"👤 <b>Имя:</b> {user_name}\n"
-                                f"💭 <b>Настроение:</b> {user_mood}" + (f"\n<i>«{user_reason}»</i>" if user_reason else "") + "\n"
-                                f"💔 <b>Партнёр:</b> не подключён\n\n"
-                                f"🔗 <b>Ваш код для пары:</b> <code>{inv_code}</code>\n"
-                                f"Передайте этот код второй половинке, чтобы соединиться!"
-                            )
-
-                        tg_send_message(
-                            chat_id,
-                            status_text,
-                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                            uname=uname
-                        )
-                        continue
-
-                    # 10. Open WebApp command
-                    if text in ("💑 Открыть «Двое»", "/open", "/app", "/dvoe", "/webapp", "открыть «двое»", "открыть двое", "двое"):
-                        tg_send_message(
-                            chat_id,
-                            "✨ Нажмите кнопку ниже, чтобы открыть приложение «Двое» 💕",
-                            reply_markup={"inline_keyboard": [[{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]]},
-                            uname=uname
-                        )
-                        continue
-
-                    # 10b. Menu command
-                    if text in ("/menu", "меню", "/help", "помощь") or text.startswith("/menu"):
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        menu_kb = [
-                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
-                            [
-                                {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
-                                {"text": "📤 Пригласить партнёра", "url": share_url}
-                            ],
-                            [
-                                {"text": "📖 О приложении", "callback_data": "about_app"},
-                                {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"}
-                            ],
-                            [{"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}]
-                        ]
-                        partner_ch = get_random_active_promo_partner()
-                        if partner_ch:
-                            p_u = partner_ch["channel_username"].lstrip("@")
-                            menu_kb.append([{"text": f"✨ Рекомендуем канал: {partner_ch['channel_title']}", "url": f"https://t.me/{p_u}"}])
-                        tg_send_message(
-                            chat_id,
-                            "📋 <b>Главное меню «Двое» 💕</b>\n\n"
-                            "Кнопки быстрого доступа всегда закреплены внизу экрана:\n"
-                            "• <b>💑 Открыть «Двое»</b> — открыть приложение для вашей пары\n"
-                            "• <b>🔗 Привязать партнёра</b> — соединить профили по коду\n"
-                            "• <b>📤 Пригласить партнёра</b> — получить персональный код для второй половинки\n"
-                            "• <b>💌 Послать знак внимания</b> — отправить мгновенное уведомление половинке\n"
-                            "• <b>ℹ️ Мой статус</b> — проверить дни вместе и статус партнёра\n"
-                            "• <b>📖 О приложении</b> — узнать о возможностях сервиса\n"
-                            "• <b>🤝 Сотрудничество и ВП</b> — бесплатный обмен аудиторией для Telegram-каналов\n"
-                            "• <b>💬 Связь с разработчиком</b> — поддержка и предложения",
-                            reply_markup={"inline_keyboard": menu_kb},
-                            uname=uname
-                        )
-                        tg_send_message(
-                            chat_id,
-                            "💫 <b>Быстрое меню закреплено внизу экрана</b> для доступа в любой момент:",
-                            reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                            uname=uname
-                        )
-                        continue
-
-                    # 10c. About App
-                    if text in ("📖 О приложении", "/about", "о приложении", "о проекте") or text.startswith("/about"):
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        about_kb = [
-                            [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}],
-                            [
-                                {"text": "🔗 Привязать партнёра", "callback_data": "enter_pair_code"},
-                                {"text": "📤 Пригласить партнёра", "url": share_url}
-                            ],
-                            [
-                                {"text": "🤝 Сотрудничество и ВП", "callback_data": "vp_menu"},
-                                {"text": "💬 Связь с разработчиком", "callback_data": "support_prompt"}
-                            ]
-                        ]
-                        tg_send_message(
-                            chat_id,
-                            ABOUT_APP_TEXT,
-                            reply_markup={"inline_keyboard": about_kb},
-                            uname=uname
-                        )
-                        continue
-
-                    # 10d. Invite Partner
-                    if text in ("📤 Пригласить партнёра", "/invite", "пригласить партнёра", "пригласить") or text.startswith("/invite"):
-                        st = get_user_full_state(uname)
-                        inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                        share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                        invite_msg = (
-                            "🔗 <b>Приглашение партнёра</b> 💕\n\n"
-                            f"Ваш персональный код пары: <code>{inv_code}</code>\n\n"
-                            "Отправьте этот код второй половинке или перешлите готовую ссылку-приглашение:"
-                        )
-                        tg_send_message(
-                            chat_id,
-                            invite_msg,
-                            reply_markup={"inline_keyboard": [
-                                [{"text": "📤 Поделиться ссылкой", "url": share_url}],
-                                [{"text": "💑 Открыть «Двое»", "web_app": {"url": user_webapp_url}}]
-                            ]},
-                            uname=uname
-                        )
-                        continue
-
-                    # 10e. Support button from keyboard
-                    if text in ("💬 Связь с разработчиком", "связь с разработчиком", "поддержка"):
-                        with db_lock:
-                            conn = get_db()
-                            conn.execute("INSERT OR REPLACE INTO support_sessions (tg_id, state, updated_at) VALUES (?, 'awaiting_ticket', ?)", (chat_id, time.time()))
-                            conn.commit()
-                            conn.close()
-                        tg_send_message(
-                            chat_id,
-                            "💬 <b>Связь с разработчиком</b>\n\n"
-                            "Напишите ваш вопрос, пожелание или предложение одним сообщением — "
-                            "оно сразу будет передано разработчику:",
-                            reply_markup={"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel_support"}]], "resize_keyboard": True},
-                            uname=uname
-                        )
-                        continue
-
-                    # 11. Default fallback message
-                    st = get_user_full_state(uname)
-                    inv_code = st["user"]["inviteCode"] if st else "PAIR-XXXXXX"
-                    share_text = urllib.parse.quote(f"Привет! Присоединяйся ко мне в приложении «Двое» 💕\nНаш код пары: {inv_code}")
-                    share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=pair_{inv_code}&text={share_text}"
-                    tg_send_message(
-                        chat_id,
-                        f"✨ <b>Приложение «Двое» 💕</b>\n\n🔗 Ваш код пары: <code>{inv_code}</code>\n\nИспользуйте кнопки меню внизу для быстрого доступа!",
-                        reply_markup=get_main_reply_keyboard(chat_id=chat_id, uname=uname),
-                        uname=uname
-                    )
+                process_telegram_update(upd)
 
         except Exception as e:
             print(f"[Bot Worker Exception] {e}")
